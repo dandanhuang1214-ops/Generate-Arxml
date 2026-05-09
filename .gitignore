@@ -1,0 +1,9 @@
+.venv/
+__pycache__/
+.pytest_cache/
+.ruff_cache/
+*.pyc
+output/*.arxml
+output/*.xml
+output/*.log
+data/input/~$*.xlsx
