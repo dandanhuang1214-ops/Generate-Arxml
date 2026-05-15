@@ -75,6 +75,24 @@ cd D:\work\SOA\code
 - `ImplementationDataType with inappropriate BaseType reference`
 - `Ambiguous ShortNames within a Package`
 
+## 校验和报告
+
+`-DryRun` 会执行 Excel 格式校验和 AUTOSAR 语义级校验。报告会尽量输出 Excel 定位信息，例如：
+
+```text
+Ports!R12 InterfaceName: interface 'xxx' does not exist.
+```
+
+当前校验包含：
+
+- 同一 SWC 内端口名、Runnable 名不能重复。
+- C/S Port 必须引用存在的 Operation。
+- S/R Port 不允许配置 OperationName。
+- `OperationInvoked` 必须绑定 C/S P-Port。
+- `DataReceived` 必须绑定 S/R R-Port。
+- Composition connector 两端方向、接口类型、接口名必须匹配。
+- AUTOSAR `SHORT-NAME` 只能使用字母、数字和下划线，且不能以数字开头。
+
 ## 命名约束
 
 为了兼容 Simulink 导入，C/S 服务建议固定为：
@@ -105,6 +123,22 @@ ComponentTypes
 ```
 
 最稳妥的方式仍然是新建空 workspace 验证，因为旧工程里残留的 BaseTypes、CompuMethods、DataTypeMappingSet 可能造成误判。
+
+## 脚本入口说明
+
+推荐唯一主入口：
+
+```powershell
+.\scripts\run_codegen.ps1
+```
+
+模板生成也建议通过主入口：
+
+```powershell
+.\scripts\run_codegen.ps1 -CreateTemplate data/input/arxml_input_template.xlsx
+```
+
+`scripts/create_excel_template.ps1` 现在只是兼容 wrapper，会转调 Python 主入口。`scripts/fill_input_from_arxml.ps1` 是 legacy round-trip 辅助脚本，仅用于从现有 ARXML 反向填充 Excel，不作为主生成链路。
 
 ## 验证
 

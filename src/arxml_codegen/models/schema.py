@@ -10,6 +10,8 @@ class ComponentRow:
     package_path: str
     is_composition: bool = False
     description: str = ""
+    source_sheet: str = ""
+    row_index: int = 0
 
 
 @dataclass(slots=True)
@@ -21,6 +23,8 @@ class DataTypeRow:
     compu_method: str = ""
     value_definition: str = ""
     description: str = ""
+    source_sheet: str = ""
+    row_index: int = 0
 
 
 @dataclass(slots=True)
@@ -31,6 +35,8 @@ class PortInterfaceRow:
     data_type_adt: str = ""
     operation_name: str = ""
     description: str = ""
+    source_sheet: str = ""
+    row_index: int = 0
 
 
 @dataclass(slots=True)
@@ -41,6 +47,8 @@ class OperationRow:
     argument_direction: str
     argument_adt: str
     description: str = ""
+    source_sheet: str = ""
+    row_index: int = 0
 
 
 @dataclass(slots=True)
@@ -55,6 +63,8 @@ class PortRow:
     init_value: str = ""
     com_spec_type: str = "nonqueued"
     description: str = ""
+    source_sheet: str = ""
+    row_index: int = 0
 
 
 @dataclass(slots=True)
@@ -63,6 +73,8 @@ class RunnableRow:
     runnable_name: str
     symbol: str = ""
     description: str = ""
+    source_sheet: str = ""
+    row_index: int = 0
 
 
 @dataclass(slots=True)
@@ -75,6 +87,8 @@ class RunnableEventRow:
     operation_name: str = ""
     data_element_name: str = ""
     description: str = ""
+    source_sheet: str = ""
+    row_index: int = 0
 
 
 @dataclass(slots=True)
@@ -86,6 +100,8 @@ class CompositionConnectorRow:
     requester_port: str
     connector_type: str = "Assembly"
     description: str = ""
+    source_sheet: str = ""
+    row_index: int = 0
 
 
 @dataclass(slots=True)

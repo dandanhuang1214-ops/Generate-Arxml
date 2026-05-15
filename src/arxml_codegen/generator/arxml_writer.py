@@ -3,6 +3,7 @@ from __future__ import annotations
 from collections import defaultdict
 from dataclasses import dataclass
 from pathlib import Path
+import re
 from uuid import uuid4
 
 import yaml
@@ -23,6 +24,7 @@ from arxml_codegen.models.schema import (
 NS = "http://autosar.org/schema/r4.0"
 NSMAP = {None: NS, "xsi": "http://www.w3.org/2001/XMLSchema-instance"}
 XSI = "http://www.w3.org/2001/XMLSchema-instance"
+SHORT_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
 TYPE_MAPPING_REF = "/DataTypes/DataTypeMappings/DataTypeMappingsSet"
 
@@ -78,87 +80,135 @@ def validate_model(model: WorkbookModel) -> ValidationResult:
     data_types = {row.adt_name for row in model.data_types}
     interfaces = {row.interface_name: row for row in model.port_interfaces}
     ports = {(row.component_name, row.port_name): row for row in model.ports}
-    operations = {(row.interface_name, row.operation_name) for row in model.operations}
+    operations_by_key = _group_operations(model.operations)
+    operations = {
+        (row.interface_name, row.operation_name)
+        for row in model.operations
+        if row.interface_name and row.operation_name
+    }
     runnables = {(row.component_name, row.runnable_name) for row in model.runnables}
 
-    _require_unique(result, "Component", [row.component_name for row in model.components])
-    _require_unique(result, "DataType ADT", [row.adt_name for row in model.data_types])
-    _require_unique(result, "PortInterface", [row.interface_name for row in model.port_interfaces])
-    _require_unique(
-        result,
-        "Port",
-        [f"{row.component_name}/{row.port_name}" for row in model.ports],
-    )
+    _require_unique_rows(result, "ComponentName", model.components, lambda row: row.component_name, "ComponentName")
+    _require_unique_rows(result, "ADTName", model.data_types, lambda row: row.adt_name, "ADTName")
+    _require_unique_rows(result, "InterfaceName", model.port_interfaces, lambda row: row.interface_name, "InterfaceName")
+    _require_unique_rows(result, "PortName within Component", model.ports, lambda row: f"{row.component_name}/{row.port_name}", "PortName")
+    _require_unique_rows(result, "RunnableName within Component", model.runnables, lambda row: f"{row.component_name}/{row.runnable_name}", "RunnableName")
 
     for row in model.components:
         if not row.component_name:
-            result.errors.append("Components: ComponentName is required.")
+            _error(result, row, "ComponentName", "ComponentName is required.")
+        _validate_short_name(result, row, row.component_name, "ComponentName")
+        _validate_package_path(result, row, row.package_path)
         if not row.package_path.startswith("/"):
-            result.errors.append(f"Components/{row.component_name}: PackagePath must start with '/'.")
+            _error(result, row, "PackagePath", "PackagePath must start with '/'.")
 
     for row in model.data_types:
         if not row.adt_name or not row.idt_name or not row.base_type:
-            result.errors.append(f"DataTypes/{row.adt_name or '<blank>'}: ADTName, IDTName and BaseType are required.")
+            _error(result, row, "ADTName/IDTName/BaseType", "ADTName, IDTName and BaseType are required.")
+        _validate_short_name(result, row, row.adt_name, "ADTName")
+        _validate_short_name(result, row, row.idt_name, "IDTName")
+        if row.compu_method:
+            _validate_short_name(result, row, row.compu_method, "CompuMethod")
         if _base_key(row.base_type) not in BASE_TYPES:
-            result.errors.append(f"DataTypes/{row.adt_name}: unsupported BaseType '{row.base_type}'.")
+            _error(result, row, "BaseType", f"unsupported BaseType '{row.base_type}'.")
 
     for row in model.port_interfaces:
         kind = row.interface_kind.upper()
+        _validate_short_name(result, row, row.interface_name, "InterfaceName")
+        _validate_short_name(result, row, row.data_element_name, "DataElementName", allow_blank=True)
+        _validate_short_name(result, row, row.operation_name, "OperationName", allow_blank=True)
         if kind not in {"SR", "CS"}:
-            result.errors.append(f"PortInterfaces/{row.interface_name}: InterfaceKind must be SR or CS.")
+            _error(result, row, "InterfaceKind", "InterfaceKind must be SR or CS.")
         if kind == "SR" and not row.data_element_name:
-            result.errors.append(f"PortInterfaces/{row.interface_name}: SR interface needs DataElementName.")
+            _error(result, row, "DataElementName", "SR interface needs DataElementName.")
         if kind == "SR" and row.data_type_adt not in data_types:
-            result.errors.append(f"PortInterfaces/{row.interface_name}: SR interface needs known DataTypeADT.")
+            _error(result, row, "DataTypeADT", "SR interface needs known DataTypeADT.")
         if kind == "CS" and not any(op.interface_name == row.interface_name for op in model.operations):
-            result.errors.append(f"PortInterfaces/{row.interface_name}: CS interface needs at least one Operation row.")
+            _error(result, row, "InterfaceName", "CS interface needs at least one Operation row.")
 
     for row in model.operations:
+        _validate_short_name(result, row, row.interface_name, "InterfaceName")
+        _validate_short_name(result, row, row.operation_name, "OperationName")
+        _validate_short_name(result, row, row.argument_name, "ArgumentName")
         if row.interface_name not in interfaces:
-            result.errors.append(f"Operations/{row.interface_name}/{row.operation_name}: interface does not exist.")
+            _error(result, row, "InterfaceName", "interface does not exist.")
         if row.argument_direction.upper() not in {"IN", "OUT", "INOUT"}:
-            result.errors.append(f"Operations/{row.interface_name}/{row.operation_name}: ArgumentDirection must be IN, OUT or INOUT.")
+            _error(result, row, "ArgumentDirection", "ArgumentDirection must be IN, OUT or INOUT.")
         if row.argument_adt not in data_types:
-            result.errors.append(f"Operations/{row.interface_name}/{row.operation_name}/{row.argument_name}: unknown ADT '{row.argument_adt}'.")
+            _error(result, row, "ArgumentADT", f"unknown ADT '{row.argument_adt}'.")
 
     for row in model.ports:
+        _validate_short_name(result, row, row.component_name, "ComponentName")
+        _validate_short_name(result, row, row.port_name, "PortName")
+        _validate_short_name(result, row, row.interface_name, "InterfaceName")
+        _validate_short_name(result, row, row.data_element_name, "DataElementName", allow_blank=True)
+        _validate_short_name(result, row, row.operation_name, "OperationName", allow_blank=True)
         if row.component_name not in components:
-            result.errors.append(f"Ports/{row.component_name}/{row.port_name}: component does not exist.")
+            _error(result, row, "ComponentName", "component does not exist.")
         if row.interface_name not in interfaces:
-            result.errors.append(f"Ports/{row.component_name}/{row.port_name}: interface '{row.interface_name}' does not exist.")
+            _error(result, row, "InterfaceName", f"interface '{row.interface_name}' does not exist.")
             continue
         iface = interfaces[row.interface_name]
         if row.interface_kind.upper() != iface.interface_kind.upper():
-            result.errors.append(f"Ports/{row.component_name}/{row.port_name}: InterfaceKind does not match PortInterfaces.")
+            _error(result, row, "InterfaceKind", "InterfaceKind does not match PortInterfaces.")
         if row.port_direction.upper() not in {"P", "R"}:
-            result.errors.append(f"Ports/{row.component_name}/{row.port_name}: PortDirection must be P or R.")
-        if iface.interface_kind.upper() == "CS" and row.operation_name and (row.interface_name, row.operation_name) not in operations:
-            result.errors.append(f"Ports/{row.component_name}/{row.port_name}: operation '{row.operation_name}' does not exist.")
+            _error(result, row, "PortDirection", "PortDirection must be P or R.")
+        if iface.interface_kind.upper() == "CS":
+            if not row.operation_name:
+                _error(result, row, "OperationName", "C/S port needs OperationName.")
+            elif (row.interface_name, row.operation_name) not in operations:
+                _error(result, row, "OperationName", f"operation '{row.operation_name}' does not exist.")
+            elif not operations_by_key[row.interface_name][row.operation_name]:
+                _error(result, row, "OperationName", "C/S operation has no argument definition.")
+        elif row.operation_name:
+            _error(result, row, "OperationName", "S/R port must not configure OperationName.")
 
     for row in model.runnable_events:
+        _validate_short_name(result, row, row.component_name, "ComponentName")
+        _validate_short_name(result, row, row.runnable_name, "RunnableName")
+        _validate_short_name(result, row, row.port_name, "PortName", allow_blank=True)
+        _validate_short_name(result, row, row.operation_name, "OperationName", allow_blank=True)
         if (row.component_name, row.runnable_name) not in runnables:
-            result.errors.append(f"RunnableEvents/{row.component_name}/{row.runnable_name}: runnable does not exist.")
+            _error(result, row, "RunnableName", "runnable does not exist.")
         trigger = _trigger_key(row.trigger_type)
         if trigger not in {"init", "periodic", "operationinvoked", "datareceived"}:
-            result.errors.append(f"RunnableEvents/{row.component_name}/{row.runnable_name}: unsupported TriggerType '{row.trigger_type}'.")
+            _error(result, row, "TriggerType", f"unsupported TriggerType '{row.trigger_type}'.")
         if trigger == "operationinvoked":
             port = ports.get((row.component_name, row.port_name))
             if not port or port.interface_kind.upper() != "CS" or port.port_direction.upper() != "P":
-                result.errors.append(f"RunnableEvents/{row.component_name}/{row.runnable_name}: OperationInvoked needs a C/S P-Port.")
+                _error(result, row, "PortName", "OperationInvoked needs a C/S P-Port.")
+            elif row.operation_name and port.operation_name != row.operation_name:
+                _error(result, row, "OperationName", "OperationInvoked OperationName must match the referenced C/S P-Port.")
         if trigger == "datareceived":
             port = ports.get((row.component_name, row.port_name))
             if not port or port.interface_kind.upper() != "SR" or port.port_direction.upper() != "R":
-                result.errors.append(f"RunnableEvents/{row.component_name}/{row.runnable_name}: DataReceived needs an S/R R-Port.")
+                _error(result, row, "PortName", "DataReceived needs an S/R R-Port.")
 
     for row in model.composition_connectors:
+        _validate_short_name(result, row, row.composition_name, "CompositionName", allow_blank=True)
+        _validate_short_name(result, row, row.provider_component, "ProviderComponent")
+        _validate_short_name(result, row, row.provider_port, "ProviderPort")
+        _validate_short_name(result, row, row.requester_component, "RequesterComponent")
+        _validate_short_name(result, row, row.requester_port, "RequesterPort")
         if row.provider_component not in components:
-            result.errors.append(f"CompositionConnectors/{row.provider_component}/{row.provider_port}: provider component does not exist.")
+            _error(result, row, "ProviderComponent", "provider component does not exist.")
         if row.requester_component not in components:
-            result.errors.append(f"CompositionConnectors/{row.requester_component}/{row.requester_port}: requester component does not exist.")
-        if (row.provider_component, row.provider_port) not in ports:
-            result.errors.append(f"CompositionConnectors/{row.provider_component}/{row.provider_port}: provider port does not exist.")
-        if (row.requester_component, row.requester_port) not in ports:
-            result.errors.append(f"CompositionConnectors/{row.requester_component}/{row.requester_port}: requester port does not exist.")
+            _error(result, row, "RequesterComponent", "requester component does not exist.")
+        provider_port = ports.get((row.provider_component, row.provider_port))
+        requester_port = ports.get((row.requester_component, row.requester_port))
+        if not provider_port:
+            _error(result, row, "ProviderPort", "provider port does not exist.")
+        if not requester_port:
+            _error(result, row, "RequesterPort", "requester port does not exist.")
+        if provider_port and provider_port.port_direction.upper() != "P":
+            _error(result, row, "ProviderPort", "provider endpoint must be a P-Port.")
+        if requester_port and requester_port.port_direction.upper() != "R":
+            _error(result, row, "RequesterPort", "requester endpoint must be an R-Port.")
+        if provider_port and requester_port:
+            if provider_port.interface_kind.upper() != requester_port.interface_kind.upper():
+                _error(result, row, "ConnectorType", "connector endpoints must use the same interface kind.")
+            if provider_port.interface_name != requester_port.interface_name:
+                _error(result, row, "ConnectorType", "connector endpoints must use the same interface name.")
 
     connected = {
         (row.provider_component, row.provider_port)
@@ -169,7 +219,7 @@ def validate_model(model: WorkbookModel) -> ValidationResult:
     }
     for row in model.ports:
         if (row.component_name, row.port_name) not in connected:
-            result.warnings.append(f"Unconnected port: {row.component_name}/{row.port_name}")
+            _warning(result, row, "PortName", f"Unconnected port: {row.component_name}/{row.port_name}")
 
     return result
 
@@ -231,6 +281,13 @@ def build_report(model: WorkbookModel, validation: ValidationResult) -> str:
     lines.extend([f"- {item}" for item in validation.errors] or ["- None"])
     lines.extend(["", "## Warnings"])
     lines.extend([f"- {item}" for item in validation.warnings] or ["- None"])
+    lines.extend(["", "## Import Risk"])
+    if validation.errors:
+        lines.append("- ARXML generation is blocked until the listed Excel issues are fixed.")
+    elif validation.warnings:
+        lines.append("- ARXML can be generated, but warnings may still appear during DaVinci Developer import.")
+    else:
+        lines.append("- No known Excel validation risks.")
     lines.extend(["", "## Simulink Notes"])
     lines.append("- C/S Function Caller names should align with the imported runnable/function names.")
     lines.append("- Generated `init_autosar_types.m` creates AliasType objects for primitive ADTs.")
@@ -548,6 +605,64 @@ def _require_unique(result: ValidationResult, label: str, values: list[str]) -> 
         if value in seen:
             result.errors.append(f"{label} '{value}' is duplicated.")
         seen.add(value)
+
+
+def _require_unique_rows(result: ValidationResult, label: str, rows, key_func, field: str) -> None:
+    seen: dict[str, object] = {}
+    for row in rows:
+        value = key_func(row)
+        if not value:
+            continue
+        if value in seen:
+            _error(result, row, field, f"{label} '{value}' is duplicated.")
+        else:
+            seen[value] = row
+
+
+def _error(result: ValidationResult, row, field: str, message: str) -> None:
+    result.errors.append(f"{_loc(row, field)}{message}")
+
+
+def _warning(result: ValidationResult, row, field: str, message: str) -> None:
+    result.warnings.append(f"{_loc(row, field)}{message}")
+
+
+def _loc(row, field: str) -> str:
+    sheet = getattr(row, "source_sheet", "")
+    row_index = getattr(row, "row_index", 0)
+    if sheet and row_index:
+        return f"{sheet}!R{row_index} {field}: "
+    return f"{field}: " if field else ""
+
+
+def _validate_short_name(
+    result: ValidationResult,
+    row,
+    value: str,
+    field: str,
+    *,
+    allow_blank: bool = False,
+) -> None:
+    if not value:
+        if not allow_blank:
+            _error(result, row, field, f"{field} is required.")
+        return
+    if not SHORT_NAME_RE.match(value):
+        _error(
+            result,
+            row,
+            field,
+            f"'{value}' is not a valid AUTOSAR SHORT-NAME. Use letters, digits and underscore, and do not start with a digit.",
+        )
+
+
+def _validate_package_path(result: ValidationResult, row, package_path: str) -> None:
+    if not package_path:
+        _error(result, row, "PackagePath", "PackagePath is required.")
+        return
+    for token in [part for part in package_path.strip("/").split("/") if part]:
+        if not SHORT_NAME_RE.match(token):
+            _error(result, row, "PackagePath", f"package token '{token}' is not a valid AUTOSAR SHORT-NAME.")
 
 
 def _uuid() -> str:

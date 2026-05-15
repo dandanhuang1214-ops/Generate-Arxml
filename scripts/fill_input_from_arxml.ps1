@@ -54,6 +54,12 @@ function Get-InitValueFromPort {
   )
   $vt = $PortNode.SelectSingleNode('.//a:INIT-VALUE//a:VT', $Ns)
   if ($vt) { return $vt.InnerText }
+  $value = $PortNode.SelectSingleNode('.//a:INIT-VALUE//a:VALUE', $Ns)
+  if ($value) { return $value.InnerText }
+  $physValue = $PortNode.SelectSingleNode('.//a:INIT-VALUE//a:SW-VALUES-PHYS/a:V', $Ns)
+  if ($physValue) { return $physValue.InnerText }
+  $physText = $PortNode.SelectSingleNode('.//a:INIT-VALUE//a:SW-VALUES-PHYS/a:VT', $Ns)
+  if ($physText) { return $physText.InnerText }
   return ''
 }
 
@@ -127,7 +133,8 @@ $portsRows = New-Object System.Collections.ArrayList
 $argumentsRows = New-Object System.Collections.ArrayList
 $usedTypes = New-Object System.Collections.Generic.HashSet[string]
 
-foreach ($swc in $appSwcs) {
+$portOwningSwcs = @($appSwcs) + @($compSwcs)
+foreach ($swc in $portOwningSwcs) {
   $componentName = $swc.SelectSingleNode('./a:SHORT-NAME', $ns).InnerText
   foreach ($port in $swc.SelectNodes('./a:PORTS/*', $ns)) {
     $portName = $port.SelectSingleNode('./a:SHORT-NAME', $ns).InnerText
@@ -244,22 +251,17 @@ foreach ($typeName in ($usedTypes | Sort-Object)) {
 $runnableEventMap = @{}
 foreach ($event in $xml.SelectNodes('//a:INIT-EVENT', $ns)) {
   $start = $event.SelectSingleNode('./a:START-ON-EVENT-REF', $ns).InnerText
-  $runnableName = Get-LastPathToken $start
   $runnableEventMap[$start] = [pscustomobject]@{ TriggerType='Init'; PeriodMs=''; PortName=''; OperationName='' }
-  $runnableEventMap[$runnableName] = [pscustomobject]@{ TriggerType='Init'; PeriodMs=''; PortName=''; OperationName='' }
 }
 foreach ($event in $xml.SelectNodes('//a:TIMING-EVENT', $ns)) {
   $start = $event.SelectSingleNode('./a:START-ON-EVENT-REF', $ns).InnerText
-  $runnableName = Get-LastPathToken $start
   $period = $event.SelectSingleNode('./a:PERIOD', $ns)
   $periodMs = if ($period) { Convert-PeriodToMs $period.InnerText } else { '' }
   $info = [pscustomobject]@{ TriggerType='Period'; PeriodMs="$periodMs"; PortName=''; OperationName='' }
   $runnableEventMap[$start] = $info
-  $runnableEventMap[$runnableName] = $info
 }
 foreach ($event in $xml.SelectNodes('//a:OPERATION-INVOKED-EVENT', $ns)) {
   $start = $event.SelectSingleNode('./a:START-ON-EVENT-REF', $ns).InnerText
-  $runnableName = Get-LastPathToken $start
   $portRef = $event.SelectSingleNode('./a:OPERATION-IREF/a:CONTEXT-P-PORT-REF', $ns)
   $opRef = $event.SelectSingleNode('./a:OPERATION-IREF/a:TARGET-PROVIDED-OPERATION-REF', $ns)
   $info = [pscustomobject]@{
@@ -269,7 +271,6 @@ foreach ($event in $xml.SelectNodes('//a:OPERATION-INVOKED-EVENT', $ns)) {
     OperationName=$(if ($opRef) { Get-LastPathToken $opRef.InnerText } else { '' })
   }
   $runnableEventMap[$start] = $info
-  $runnableEventMap[$runnableName] = $info
 }
 
 $runnablesRows = New-Object System.Collections.ArrayList
@@ -277,13 +278,17 @@ foreach ($swc in $appSwcs) {
   $componentName = $swc.SelectSingleNode('./a:SHORT-NAME', $ns).InnerText
   foreach ($rbl in $swc.SelectNodes('.//a:RUNNABLE-ENTITY', $ns)) {
     $runnableName = $rbl.SelectSingleNode('./a:SHORT-NAME', $ns).InnerText
-    $runnablePath = $null
     $symbol = $rbl.SelectSingleNode('./a:SYMBOL', $ns)
-    $key = $runnableName
+    $behavior = $rbl.ParentNode.ParentNode
+    $behaviorName = $behavior.SelectSingleNode('./a:SHORT-NAME', $ns).InnerText
+    $componentPkg = Get-PackagePathForNode -Node $swc -Ns $ns
+    $runnablePath = "$componentPkg/$componentName/$behaviorName/$runnableName"
+    $key = $runnablePath
     $eventInfo = if ($runnableEventMap.ContainsKey($key)) { $runnableEventMap[$key] } else { [pscustomobject]@{TriggerType='';PeriodMs='';PortName='';OperationName=''} }
     [void]$runnablesRows.Add(@(
       $componentName,
       $runnableName,
+      $(if ($symbol) { $symbol.InnerText } else { $runnableName }),
       $eventInfo.TriggerType,
       $eventInfo.PeriodMs,
       $eventInfo.PortName,
@@ -349,10 +354,10 @@ $sheets = @(
   @{
     Name = 'Runnables'
     Hidden = $false
-    Headers = @('ComponentName', 'RunnableName', 'TriggerType', 'PeriodMs', 'PortName', 'OperationName', 'Description')
+    Headers = @('ComponentName', 'RunnableName', 'Symbol', 'TriggerType', 'PeriodMs', 'PortName', 'OperationName', 'Description')
     Rows = $runnablesRows
     Validations = @(
-      @{ Range = 'C2:C1000'; Formula = '=Options!$I$2:$I$4' }
+      @{ Range = 'D2:D1000'; Formula = '=Options!$I$2:$I$4' }
     )
   },
   @{

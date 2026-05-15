@@ -63,28 +63,28 @@ def _nonempty(row: Iterable[str]) -> bool:
     return any(cell for cell in row)
 
 
-def _rows_for(workbook, logical_name: str) -> list[list[str]]:
+def _rows_for(workbook, logical_name: str) -> tuple[str, list[list[str]]]:
     for sheet_name in SHEET_ALIASES[logical_name]:
         if sheet_name in workbook.sheetnames:
-            return _sheet_rows(workbook[sheet_name])
-    return []
+            return sheet_name, _sheet_rows(workbook[sheet_name])
+    return "", []
 
 
 def _iter_data_rows(workbook, logical_name: str):
-    rows = _rows_for(workbook, logical_name)
+    sheet_name, rows = _rows_for(workbook, logical_name)
     if not rows:
         return
     header = _header_index(rows[0])
-    for row in rows[1:]:
+    for row_index, row in enumerate(rows[1:], start=2):
         if _nonempty(row):
-            yield header, row
+            yield sheet_name, row_index, header, row
 
 
 def load_workbook_model(path: Path) -> WorkbookModel:
     workbook = load_workbook(path, data_only=True)
     model = WorkbookModel()
 
-    for header, row in _iter_data_rows(workbook, "Components") or []:
+    for sheet_name, row_index, header, row in _iter_data_rows(workbook, "Components") or []:
         kind = _cell(row, header, "ComponentKind", "ComponentCategory")
         component_name = _cell(row, header, "ComponentName")
         is_composition = _bool(_cell(row, header, "IsComposition")) or kind.lower() == "composition"
@@ -95,10 +95,12 @@ def load_workbook_model(path: Path) -> WorkbookModel:
                 package_path=_cell(row, header, "PackagePath") or "/ComponentTypes",
                 is_composition=is_composition,
                 description=_cell(row, header, "Description"),
+                source_sheet=sheet_name,
+                row_index=row_index,
             )
         )
 
-    for header, row in _iter_data_rows(workbook, "DataTypes") or []:
+    for sheet_name, row_index, header, row in _iter_data_rows(workbook, "DataTypes") or []:
         model.data_types.append(
             DataTypeRow(
                 adt_name=_cell(row, header, "ADTName", "DataType", "TypeName"),
@@ -108,10 +110,12 @@ def load_workbook_model(path: Path) -> WorkbookModel:
                 compu_method=_cell(row, header, "CompuMethod"),
                 value_definition=_cell(row, header, "ValueDefinition", "ValueMap"),
                 description=_cell(row, header, "Description"),
+                source_sheet=sheet_name,
+                row_index=row_index,
             )
         )
 
-    for header, row in _iter_data_rows(workbook, "PortInterfaces") or []:
+    for sheet_name, row_index, header, row in _iter_data_rows(workbook, "PortInterfaces") or []:
         model.port_interfaces.append(
             PortInterfaceRow(
                 interface_name=_cell(row, header, "InterfaceName"),
@@ -120,10 +124,12 @@ def load_workbook_model(path: Path) -> WorkbookModel:
                 data_type_adt=_cell(row, header, "DataTypeADT", "DataType"),
                 operation_name=_cell(row, header, "OperationName"),
                 description=_cell(row, header, "Description"),
+                source_sheet=sheet_name,
+                row_index=row_index,
             )
         )
 
-    for header, row in _iter_data_rows(workbook, "Operations") or []:
+    for sheet_name, row_index, header, row in _iter_data_rows(workbook, "Operations") or []:
         model.operations.append(
             OperationRow(
                 interface_name=_cell(row, header, "InterfaceName"),
@@ -132,10 +138,12 @@ def load_workbook_model(path: Path) -> WorkbookModel:
                 argument_direction=_cell(row, header, "ArgumentDirection"),
                 argument_adt=_cell(row, header, "ArgumentADT", "ArgumentType"),
                 description=_cell(row, header, "Description"),
+                source_sheet=sheet_name,
+                row_index=row_index,
             )
         )
 
-    for header, row in _iter_data_rows(workbook, "Ports") or []:
+    for sheet_name, row_index, header, row in _iter_data_rows(workbook, "Ports") or []:
         model.ports.append(
             PortRow(
                 component_name=_cell(row, header, "ComponentName"),
@@ -148,16 +156,20 @@ def load_workbook_model(path: Path) -> WorkbookModel:
                 init_value=_cell(row, header, "InitValue"),
                 com_spec_type=_cell(row, header, "ComSpecType") or "nonqueued",
                 description=_cell(row, header, "Description"),
+                source_sheet=sheet_name,
+                row_index=row_index,
             )
         )
 
-    for header, row in _iter_data_rows(workbook, "Runnables") or []:
+    for sheet_name, row_index, header, row in _iter_data_rows(workbook, "Runnables") or []:
         model.runnables.append(
             RunnableRow(
                 component_name=_cell(row, header, "ComponentName"),
                 runnable_name=_cell(row, header, "RunnableName"),
                 symbol=_cell(row, header, "Symbol") or _cell(row, header, "RunnableName"),
                 description=_cell(row, header, "Description"),
+                source_sheet=sheet_name,
+                row_index=row_index,
             )
         )
 
@@ -173,10 +185,12 @@ def load_workbook_model(path: Path) -> WorkbookModel:
                     port_name=_cell(row, header, "PortName"),
                     operation_name=_cell(row, header, "OperationName"),
                     description=_cell(row, header, "Description"),
+                    source_sheet=sheet_name,
+                    row_index=row_index,
                 )
             )
 
-    for header, row in _iter_data_rows(workbook, "RunnableEvents") or []:
+    for sheet_name, row_index, header, row in _iter_data_rows(workbook, "RunnableEvents") or []:
         model.runnable_events.append(
             RunnableEventRow(
                 component_name=_cell(row, header, "ComponentName"),
@@ -187,10 +201,12 @@ def load_workbook_model(path: Path) -> WorkbookModel:
                 operation_name=_cell(row, header, "OperationName"),
                 data_element_name=_cell(row, header, "DataElementName"),
                 description=_cell(row, header, "Description"),
+                source_sheet=sheet_name,
+                row_index=row_index,
             )
         )
 
-    for header, row in _iter_data_rows(workbook, "CompositionConnectors") or []:
+    for sheet_name, row_index, header, row in _iter_data_rows(workbook, "CompositionConnectors") or []:
         model.composition_connectors.append(
             CompositionConnectorRow(
                 composition_name=_cell(row, header, "CompositionName"),
@@ -200,6 +216,8 @@ def load_workbook_model(path: Path) -> WorkbookModel:
                 requester_port=_cell(row, header, "RequesterPort"),
                 connector_type=_cell(row, header, "ConnectorType") or "Assembly",
                 description=_cell(row, header, "Description"),
+                source_sheet=sheet_name,
+                row_index=row_index,
             )
         )
 
@@ -225,13 +243,7 @@ def _infer_missing_data(model: WorkbookModel) -> None:
                 )
 
     if not model.data_types:
-        type_names: set[str] = set()
-        for port in model.ports:
-            if port.interface_kind.upper() == "SR" and port.data_element_name:
-                # Older workbooks put the ADT in the DataType column.
-                type_names.add(port.description if False else "")
-        for operation in model.operations:
-            type_names.add(operation.argument_adt)
+        type_names: set[str] = {operation.argument_adt for operation in model.operations}
         for type_name in sorted(t for t in type_names if t):
             model.data_types.append(
                 DataTypeRow(
