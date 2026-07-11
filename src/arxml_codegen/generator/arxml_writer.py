@@ -3,37 +3,23 @@ from __future__ import annotations
 from collections import defaultdict
 from dataclasses import dataclass
 from pathlib import Path
-import re
 from uuid import uuid4
 
 import yaml
 from lxml import etree
 
-from arxml_codegen.models.schema import (
-    ComponentRow,
-    DataTypeRow,
-    OperationRow,
-    PortInterfaceRow,
-    PortRow,
-    RunnableEventRow,
-    RunnableRow,
-    ValidationResult,
-    WorkbookModel,
-)
+from arxml_codegen.models.schema import UnitRow, WorkbookV2Model
 
 NS = "http://autosar.org/schema/r4.0"
 NSMAP = {None: NS, "xsi": "http://www.w3.org/2001/XMLSchema-instance"}
 XSI = "http://www.w3.org/2001/XMLSchema-instance"
-SHORT_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
-
-TYPE_MAPPING_REF = "/DataTypes/DataTypeMappings/DataTypeMappingsSet"
 
 BASE_TYPES = {
     "boolean": ("boolean", "8", "BOOLEAN"),
-    "bool": ("boolean", "8", "BOOLEAN"),
     "uint8": ("uint8", "8", "NONE"),
     "uint16": ("uint16", "16", "NONE"),
     "uint32": ("uint32", "32", "NONE"),
+    "uint64": ("uint64", "64", "NONE"),
     "sint8": ("sint8", "8", "2C"),
     "sint16": ("sint16", "16", "2C"),
     "sint32": ("sint32", "32", "2C"),
@@ -48,7 +34,6 @@ class GeneratorConfig:
     report: Path
     matlab_init: Path | None
     autosar_version: str = "4-3-0"
-    template: Path | None = None
 
 
 def load_config(path: Path) -> GeneratorConfig:
@@ -58,14 +43,12 @@ def load_config(path: Path) -> GeneratorConfig:
     output = _resolve(base_dir, data["generation"]["output"])
     report = _resolve(base_dir, data["generation"].get("report", "output/generation_report.md"))
     matlab_value = data["generation"].get("matlab_init", "output/init_autosar_types.m")
-    template_value = data.get("template", {}).get("arxml")
     return GeneratorConfig(
         workbook=workbook,
         output=output,
         report=report,
         matlab_init=_resolve(base_dir, matlab_value) if matlab_value else None,
         autosar_version=str(data["generation"].get("autosar_version", "4-3-0")),
-        template=_resolve(base_dir, template_value) if template_value else None,
     )
 
 
@@ -74,595 +57,604 @@ def _resolve(base_dir: Path, value: str | Path) -> Path:
     return path if path.is_absolute() else (base_dir / path).resolve()
 
 
-def validate_model(model: WorkbookModel) -> ValidationResult:
-    result = ValidationResult()
-    components = {row.component_name for row in model.components}
-    data_types = {row.adt_name for row in model.data_types}
-    interfaces = {row.interface_name: row for row in model.port_interfaces}
-    ports = {(row.component_name, row.port_name): row for row in model.ports}
-    operations_by_key = _group_operations(model.operations)
-    operations = {
-        (row.interface_name, row.operation_name)
-        for row in model.operations
-        if row.interface_name and row.operation_name
-    }
-    runnables = {(row.component_name, row.runnable_name) for row in model.runnables}
-
-    _require_unique_rows(result, "ComponentName", model.components, lambda row: row.component_name, "ComponentName")
-    _require_unique_rows(result, "ADTName", model.data_types, lambda row: row.adt_name, "ADTName")
-    _require_unique_rows(result, "InterfaceName", model.port_interfaces, lambda row: row.interface_name, "InterfaceName")
-    _require_unique_rows(result, "PortName within Component", model.ports, lambda row: f"{row.component_name}/{row.port_name}", "PortName")
-    _require_unique_rows(result, "RunnableName within Component", model.runnables, lambda row: f"{row.component_name}/{row.runnable_name}", "RunnableName")
-
-    for row in model.components:
-        if not row.component_name:
-            _error(result, row, "ComponentName", "ComponentName is required.")
-        _validate_short_name(result, row, row.component_name, "ComponentName")
-        _validate_package_path(result, row, row.package_path)
-        if not row.package_path.startswith("/"):
-            _error(result, row, "PackagePath", "PackagePath must start with '/'.")
-
-    for row in model.data_types:
-        if not row.adt_name or not row.idt_name or not row.base_type:
-            _error(result, row, "ADTName/IDTName/BaseType", "ADTName, IDTName and BaseType are required.")
-        _validate_short_name(result, row, row.adt_name, "ADTName")
-        _validate_short_name(result, row, row.idt_name, "IDTName")
-        if row.compu_method:
-            _validate_short_name(result, row, row.compu_method, "CompuMethod")
-        if _base_key(row.base_type) not in BASE_TYPES:
-            _error(result, row, "BaseType", f"unsupported BaseType '{row.base_type}'.")
-
-    for row in model.port_interfaces:
-        kind = row.interface_kind.upper()
-        _validate_short_name(result, row, row.interface_name, "InterfaceName")
-        _validate_short_name(result, row, row.data_element_name, "DataElementName", allow_blank=True)
-        _validate_short_name(result, row, row.operation_name, "OperationName", allow_blank=True)
-        if kind not in {"SR", "CS"}:
-            _error(result, row, "InterfaceKind", "InterfaceKind must be SR or CS.")
-        if kind == "SR" and not row.data_element_name:
-            _error(result, row, "DataElementName", "SR interface needs DataElementName.")
-        if kind == "SR" and row.data_type_adt not in data_types:
-            _error(result, row, "DataTypeADT", "SR interface needs known DataTypeADT.")
-        if kind == "CS" and not any(op.interface_name == row.interface_name for op in model.operations):
-            _error(result, row, "InterfaceName", "CS interface needs at least one Operation row.")
-
-    for row in model.operations:
-        _validate_short_name(result, row, row.interface_name, "InterfaceName")
-        _validate_short_name(result, row, row.operation_name, "OperationName")
-        _validate_short_name(result, row, row.argument_name, "ArgumentName")
-        if row.interface_name not in interfaces:
-            _error(result, row, "InterfaceName", "interface does not exist.")
-        if row.argument_direction.upper() not in {"IN", "OUT", "INOUT"}:
-            _error(result, row, "ArgumentDirection", "ArgumentDirection must be IN, OUT or INOUT.")
-        if row.argument_adt not in data_types:
-            _error(result, row, "ArgumentADT", f"unknown ADT '{row.argument_adt}'.")
-
-    for row in model.ports:
-        _validate_short_name(result, row, row.component_name, "ComponentName")
-        _validate_short_name(result, row, row.port_name, "PortName")
-        _validate_short_name(result, row, row.interface_name, "InterfaceName")
-        _validate_short_name(result, row, row.data_element_name, "DataElementName", allow_blank=True)
-        _validate_short_name(result, row, row.operation_name, "OperationName", allow_blank=True)
-        if row.component_name not in components:
-            _error(result, row, "ComponentName", "component does not exist.")
-        if row.interface_name not in interfaces:
-            _error(result, row, "InterfaceName", f"interface '{row.interface_name}' does not exist.")
-            continue
-        iface = interfaces[row.interface_name]
-        if row.interface_kind.upper() != iface.interface_kind.upper():
-            _error(result, row, "InterfaceKind", "InterfaceKind does not match PortInterfaces.")
-        if row.port_direction.upper() not in {"P", "R"}:
-            _error(result, row, "PortDirection", "PortDirection must be P or R.")
-        if iface.interface_kind.upper() == "CS":
-            if not row.operation_name:
-                _error(result, row, "OperationName", "C/S port needs OperationName.")
-            elif (row.interface_name, row.operation_name) not in operations:
-                _error(result, row, "OperationName", f"operation '{row.operation_name}' does not exist.")
-            elif not operations_by_key[row.interface_name][row.operation_name]:
-                _error(result, row, "OperationName", "C/S operation has no argument definition.")
-        elif row.operation_name:
-            _error(result, row, "OperationName", "S/R port must not configure OperationName.")
-
-    for row in model.runnable_events:
-        _validate_short_name(result, row, row.component_name, "ComponentName")
-        _validate_short_name(result, row, row.runnable_name, "RunnableName")
-        _validate_short_name(result, row, row.port_name, "PortName", allow_blank=True)
-        _validate_short_name(result, row, row.operation_name, "OperationName", allow_blank=True)
-        if (row.component_name, row.runnable_name) not in runnables:
-            _error(result, row, "RunnableName", "runnable does not exist.")
-        trigger = _trigger_key(row.trigger_type)
-        if trigger not in {"init", "periodic", "operationinvoked", "datareceived"}:
-            _error(result, row, "TriggerType", f"unsupported TriggerType '{row.trigger_type}'.")
-        if trigger == "operationinvoked":
-            port = ports.get((row.component_name, row.port_name))
-            if not port or port.interface_kind.upper() != "CS" or port.port_direction.upper() != "P":
-                _error(result, row, "PortName", "OperationInvoked needs a C/S P-Port.")
-            elif row.operation_name and port.operation_name != row.operation_name:
-                _error(result, row, "OperationName", "OperationInvoked OperationName must match the referenced C/S P-Port.")
-        if trigger == "datareceived":
-            port = ports.get((row.component_name, row.port_name))
-            if not port or port.interface_kind.upper() != "SR" or port.port_direction.upper() != "R":
-                _error(result, row, "PortName", "DataReceived needs an S/R R-Port.")
-
-    for row in model.composition_connectors:
-        _validate_short_name(result, row, row.composition_name, "CompositionName", allow_blank=True)
-        _validate_short_name(result, row, row.provider_component, "ProviderComponent")
-        _validate_short_name(result, row, row.provider_port, "ProviderPort")
-        _validate_short_name(result, row, row.requester_component, "RequesterComponent")
-        _validate_short_name(result, row, row.requester_port, "RequesterPort")
-        if row.provider_component not in components:
-            _error(result, row, "ProviderComponent", "provider component does not exist.")
-        if row.requester_component not in components:
-            _error(result, row, "RequesterComponent", "requester component does not exist.")
-        provider_port = ports.get((row.provider_component, row.provider_port))
-        requester_port = ports.get((row.requester_component, row.requester_port))
-        if not provider_port:
-            _error(result, row, "ProviderPort", "provider port does not exist.")
-        if not requester_port:
-            _error(result, row, "RequesterPort", "requester port does not exist.")
-        if provider_port and provider_port.port_direction.upper() != "P":
-            _error(result, row, "ProviderPort", "provider endpoint must be a P-Port.")
-        if requester_port and requester_port.port_direction.upper() != "R":
-            _error(result, row, "RequesterPort", "requester endpoint must be an R-Port.")
-        if provider_port and requester_port:
-            if provider_port.interface_kind.upper() != requester_port.interface_kind.upper():
-                _error(result, row, "ConnectorType", "connector endpoints must use the same interface kind.")
-            if provider_port.interface_name != requester_port.interface_name:
-                _error(result, row, "ConnectorType", "connector endpoints must use the same interface name.")
-
-    connected = {
-        (row.provider_component, row.provider_port)
-        for row in model.composition_connectors
-    } | {
-        (row.requester_component, row.requester_port)
-        for row in model.composition_connectors
-    }
-    for row in model.ports:
-        if (row.component_name, row.port_name) not in connected:
-            _warning(result, row, "PortName", f"Unconnected port: {row.component_name}/{row.port_name}")
-
-    return result
+def write_outputs(model: WorkbookV2Model, config: GeneratorConfig) -> None:
+    write_arxml_v2(model, config.output)
+    _write_report(config.report, model, [])
 
 
-def build_arxml(model: WorkbookModel, autosar_version: str = "4-3-0") -> etree._ElementTree:
-    validation = validate_model(model)
-    if not validation.ok:
-        raise ValueError("Input validation failed:\n" + "\n".join(validation.errors))
+def _write_report(path: Path, model: WorkbookV2Model, errors: list[str]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    lines = [
+        "# ARXML Generation Report",
+        "",
+        "## Summary",
+        "",
+        f"- Components: {len(model.components)}",
+        f"- Component prototypes: {len(model.component_prototypes)}",
+        f"- Primitive data types: {len(model.primitive_data_types)}",
+        f"- Record types: {len(model.record_types)}",
+        f"- SR interfaces: {len(model.sr_interfaces)}",
+        f"- CS interfaces: {len(model.cs_interfaces)}",
+        f"- Ports: {len(model.ports)}",
+        f"- Runnables: {len(model.runnables)}",
+        f"- Runnable events: {len(model.runnable_events)}",
+        f"- Runnable accesses: {len(model.runnable_accesses)}",
+        f"- Composition connectors: {len(model.composition_connectors)}",
+        "",
+        "## Validation",
+        "",
+    ]
+    if errors:
+        lines.extend(f"- ERROR: {error}" for error in errors)
+    else:
+        lines.append("- No validation errors.")
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
+
+def build_arxml_v2(model: WorkbookV2Model) -> etree._ElementTree:
+    version = model.config("AutosarVersion", "4-3-0")
     root = etree.Element(f"{{{NS}}}AUTOSAR", nsmap=NSMAP)
-    root.set(f"{{{XSI}}}schemaLocation", f"http://autosar.org/schema/r4.0 AUTOSAR_{autosar_version}.xsd")
+    root.set(f"{{{XSI}}}schemaLocation", f"http://autosar.org/schema/r4.0 AUTOSAR_{version}.xsd")
     packages = _el(root, "AR-PACKAGES")
 
-    _write_platform_types(packages, model.data_types)
-    _write_data_types(packages, model.data_types)
+    _write_platform(packages, model)
+    _write_units(packages, model)
+    _write_compu_methods(packages, model)
+    _write_data_constrs(packages, model)
+    _write_application_types(packages, model)
+    _write_custom_implementation_types(packages, model)
+    _write_mapping_sets(packages, model)
     _write_interfaces(packages, model)
     _write_components(packages, model)
     return etree.ElementTree(root)
 
 
-def write_outputs(model: WorkbookModel, config: GeneratorConfig) -> ValidationResult:
-    validation = validate_model(model)
-    config.report.parent.mkdir(parents=True, exist_ok=True)
-    config.report.write_text(build_report(model, validation), encoding="utf-8")
-    if not validation.ok:
-        raise ValueError(f"Input validation failed. See report: {config.report}")
-
-    tree = build_arxml(model, config.autosar_version)
-    config.output.parent.mkdir(parents=True, exist_ok=True)
-    tree.write(str(config.output), pretty_print=True, xml_declaration=True, encoding="utf-8")
-    if config.matlab_init:
-        config.matlab_init.parent.mkdir(parents=True, exist_ok=True)
-        config.matlab_init.write_text(build_matlab_init(model), encoding="utf-8")
-    return validation
-
-
-def write_arxml(model: WorkbookModel, output_path: Path) -> None:
-    tree = build_arxml(model)
+def write_arxml_v2(model: WorkbookV2Model, output_path: Path) -> None:
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    tree.write(str(output_path), pretty_print=True, xml_declaration=True, encoding="utf-8")
+    build_arxml_v2(model).write(str(output_path), pretty_print=True, xml_declaration=True, encoding="utf-8")
 
 
-def build_report(model: WorkbookModel, validation: ValidationResult) -> str:
-    lines = [
-        "# ARXML Generation Report",
-        "",
-        "## Summary",
-        f"- Components: {len(model.components)}",
-        f"- DataTypes: {len(model.data_types)}",
-        f"- PortInterfaces: {len(model.port_interfaces)}",
-        f"- Operations arguments: {len(model.operations)}",
-        f"- Ports: {len(model.ports)}",
-        f"- Runnables: {len(model.runnables)}",
-        f"- RunnableEvents: {len(model.runnable_events)}",
-        f"- CompositionConnectors: {len(model.composition_connectors)}",
-        "",
-        "## Errors",
-    ]
-    lines.extend([f"- {item}" for item in validation.errors] or ["- None"])
-    lines.extend(["", "## Warnings"])
-    lines.extend([f"- {item}" for item in validation.warnings] or ["- None"])
-    lines.extend(["", "## Import Risk"])
-    if validation.errors:
-        lines.append("- ARXML generation is blocked until the listed Excel issues are fixed.")
-    elif validation.warnings:
-        lines.append("- ARXML can be generated, but warnings may still appear during DaVinci Developer import.")
-    else:
-        lines.append("- No known Excel validation risks.")
-    lines.extend(["", "## Simulink Notes"])
-    lines.append("- C/S Function Caller names should align with the imported runnable/function names.")
-    lines.append("- Generated `init_autosar_types.m` creates AliasType objects for primitive ADTs.")
-    return "\n".join(lines) + "\n"
+def summarize_v2(model: WorkbookV2Model) -> str:
+    return (
+        f"Loaded v2: {len(model.components)} components, "
+        f"{len(model.component_prototypes)} prototypes, "
+        f"{len(model.primitive_data_types)} primitive types, "
+        f"{len(model.record_types)} record types, "
+        f"{len(model.sr_interfaces)} SR interfaces, "
+        f"{len(model.cs_interfaces)} CS interfaces, "
+        f"{len(model.ports)} ports, "
+        f"{len(model.runnables)} runnables, "
+        f"{len(model.composition_connectors)} connectors."
+    )
 
 
-def build_matlab_init(model: WorkbookModel) -> str:
-    lines = [
-        "% Auto-generated by arxml-codegen.",
-        "% Run this before updating imported Simulink AUTOSAR models.",
-        "",
-    ]
-    for row in sorted(model.data_types, key=lambda item: item.adt_name):
-        base = _matlab_base_type(row.base_type)
-        lines.extend(
-            [
-                f"if ~exist('{row.adt_name}', 'var')",
-                f"    {row.adt_name} = Simulink.AliasType;",
-                f"    {row.adt_name}.BaseType = '{base}';",
-                "end",
-                "",
-            ]
-        )
-    return "\n".join(lines)
+def validate_model_v2(model: WorkbookV2Model) -> list[str]:
+    errors: list[str] = []
+    components = {row.component_name: row for row in model.components}
+    compositions = {row.component_name for row in model.components if row.component_kind.lower() == "composition"}
+    sr_interfaces = {row.interface_path: row for row in model.sr_interfaces}
+    cs_interfaces = {row.interface_path: row for row in model.cs_interfaces}
+    cs_operations = {(row.interface_name, row.operation_name) for row in model.cs_operations}
+    ports = {(row.component_name, row.port_name): row for row in model.ports}
+    runnables = {(row.component_name, row.runnable_name) for row in model.runnables}
+    prototypes = {(row.composition_name, row.prototype_name): row for row in model.component_prototypes}
+    app_type_refs = {row.application_type_path for row in model.primitive_data_types}
+    app_type_refs.update(row.application_type_path for row in model.record_types)
+    impl_type_refs = {row.implementation_type_path for row in model.record_types}
+    impl_type_refs.update(f"/AUTOSAR_Platform/ImplementationDataTypes/{name}" for name, _, _ in BASE_TYPES.values())
+
+    def loc(row, field: str) -> str:
+        return f"{row.source_sheet}!R{row.row_index} {field}:"
+
+    for row in model.components:
+        if not row.component_name:
+            errors.append(f"{loc(row, 'ComponentName')} ComponentName is required.")
+        if not row.package_path.startswith("/"):
+            errors.append(f"{loc(row, 'PackagePath')} PackagePath must start with '/'.")
+        if row.component_kind.lower() not in {"application", "composition"}:
+            errors.append(f"{loc(row, 'ComponentKind')} ComponentKind must be Application or Composition.")
+
+    seen_component_names: set[str] = set()
+    for row in model.components:
+        if row.component_name in seen_component_names:
+            errors.append(f"{loc(row, 'ComponentName')} duplicated component name '{row.component_name}'.")
+        seen_component_names.add(row.component_name)
+
+    for row in model.component_prototypes:
+        if row.composition_name not in compositions:
+            errors.append(f"{loc(row, 'CompositionName')} unknown composition '{row.composition_name}'.")
+        if row.component_type_name not in components:
+            errors.append(f"{loc(row, 'ComponentTypeName')} unknown component type '{row.component_type_name}'.")
+        if not row.component_type_ref:
+            errors.append(f"{loc(row, 'ComponentTypeRef')} ComponentTypeRef is required.")
+
+    for row in model.primitive_data_types:
+        if not row.application_type_path.startswith("/"):
+            errors.append(f"{loc(row, 'ApplicationTypePath')} ApplicationTypePath must start with '/'.")
+        if not row.implementation_type_path.startswith("/"):
+            errors.append(f"{loc(row, 'ImplementationTypePath')} ImplementationTypePath must start with '/'.")
+        if row.base_type.lower() not in BASE_TYPES:
+            errors.append(f"{loc(row, 'BaseType')} unsupported BaseType '{row.base_type}'.")
+
+    for row in model.record_types:
+        if not row.application_type_path.startswith("/"):
+            errors.append(f"{loc(row, 'ApplicationTypePath')} ApplicationTypePath must start with '/'.")
+        if not row.implementation_type_path.startswith("/"):
+            errors.append(f"{loc(row, 'ImplementationTypePath')} ImplementationTypePath must start with '/'.")
+
+    for row in model.record_elements:
+        if row.application_element_type_ref not in app_type_refs:
+            errors.append(f"{loc(row, 'ApplicationElementTypeRef')} unknown application data type ref '{row.application_element_type_ref}'.")
+        if row.implementation_element_type_ref not in impl_type_refs:
+            errors.append(f"{loc(row, 'ImplementationElementTypeRef')} unknown implementation data type ref '{row.implementation_element_type_ref}'.")
+
+    for row in model.data_type_mappings:
+        if row.application_type_ref not in app_type_refs:
+            errors.append(f"{loc(row, 'ApplicationTypeRef')} unknown application data type ref '{row.application_type_ref}'.")
+        if row.implementation_type_ref not in impl_type_refs:
+            errors.append(f"{loc(row, 'ImplementationTypeRef')} unknown implementation data type ref '{row.implementation_type_ref}'.")
+
+    for row in model.sr_data_elements:
+        if row.application_type_ref not in app_type_refs:
+            errors.append(f"{loc(row, 'ApplicationTypeRef')} unknown application data type ref '{row.application_type_ref}'.")
+
+    for row in model.cs_arguments:
+        if row.application_type_ref not in app_type_refs:
+            errors.append(f"{loc(row, 'ApplicationTypeRef')} unknown application data type ref '{row.application_type_ref}'.")
+
+    for row in model.ports:
+        if row.component_name not in components:
+            errors.append(f"{loc(row, 'ComponentName')} unknown component '{row.component_name}'.")
+        if row.port_direction not in {"P", "R"}:
+            errors.append(f"{loc(row, 'PortDirection')} PortDirection must be P or R.")
+        if row.interface_kind == "SR":
+            if row.interface_ref not in sr_interfaces:
+                errors.append(f"{loc(row, 'InterfaceRef')} unknown SR interface ref '{row.interface_ref}'.")
+            if row.operation_name:
+                errors.append(f"{loc(row, 'OperationName')} SR port must not bind OperationName.")
+        elif row.interface_kind == "CS":
+            iface = cs_interfaces.get(row.interface_ref)
+            if iface is None:
+                errors.append(f"{loc(row, 'InterfaceRef')} unknown CS interface ref '{row.interface_ref}'.")
+            elif (iface.interface_name, row.operation_name) not in cs_operations:
+                errors.append(f"{loc(row, 'OperationName')} unknown CS operation '{row.operation_name}' on interface '{iface.interface_name}'.")
+        else:
+            errors.append(f"{loc(row, 'InterfaceKind')} InterfaceKind must be SR or CS.")
+
+    seen_ports: set[tuple[str, str]] = set()
+    for row in model.ports:
+        key = (row.component_name, row.port_name)
+        if key in seen_ports:
+            errors.append(f"{loc(row, 'PortName')} duplicated port '{row.component_name}/{row.port_name}'.")
+        seen_ports.add(key)
+
+    for row in model.runnables:
+        if row.component_name not in components:
+            errors.append(f"{loc(row, 'ComponentName')} unknown component '{row.component_name}'.")
+
+    seen_runnables: set[tuple[str, str]] = set()
+    for row in model.runnables:
+        key = (row.component_name, row.runnable_name)
+        if key in seen_runnables:
+            errors.append(f"{loc(row, 'RunnableName')} duplicated runnable '{row.component_name}/{row.runnable_name}'.")
+        seen_runnables.add(key)
+
+    for row in model.runnable_events:
+        if (row.component_name, row.runnable_name) not in runnables:
+            errors.append(f"{loc(row, 'RunnableName')} unknown runnable '{row.component_name}/{row.runnable_name}'.")
+        if row.trigger_type not in {"Init", "Periodic", "OperationInvoked", "DataReceived"}:
+            errors.append(f"{loc(row, 'TriggerType')} TriggerType must be Init, Periodic, OperationInvoked or DataReceived.")
+        if row.port_name and (row.component_name, row.port_name) not in ports:
+            errors.append(f"{loc(row, 'PortName')} unknown port '{row.component_name}/{row.port_name}'.")
+
+    for row in model.runnable_accesses:
+        if (row.component_name, row.runnable_name) not in runnables:
+            errors.append(f"{loc(row, 'RunnableName')} unknown runnable '{row.component_name}/{row.runnable_name}'.")
+        if row.port_name and (row.component_name, row.port_name) not in ports:
+            errors.append(f"{loc(row, 'PortName')} unknown port '{row.component_name}/{row.port_name}'.")
+
+    for row in model.composition_connectors:
+        if row.composition_name not in compositions:
+            errors.append(f"{loc(row, 'CompositionName')} unknown composition '{row.composition_name}'.")
+            continue
+        provider_proto = prototypes.get((row.composition_name, row.provider_prototype))
+        requester_proto = prototypes.get((row.composition_name, row.requester_prototype))
+        if provider_proto is None:
+            errors.append(f"{loc(row, 'ProviderPrototype')} unknown provider prototype '{row.provider_prototype}'.")
+            continue
+        if requester_proto is None:
+            errors.append(f"{loc(row, 'RequesterPrototype')} unknown requester prototype '{row.requester_prototype}'.")
+            continue
+        provider_port = ports.get((provider_proto.component_type_name, row.provider_port))
+        requester_port = ports.get((requester_proto.component_type_name, row.requester_port))
+        if provider_port is None:
+            errors.append(f"{loc(row, 'ProviderPort')} unknown provider port '{provider_proto.component_type_name}/{row.provider_port}'.")
+            continue
+        if requester_port is None:
+            errors.append(f"{loc(row, 'RequesterPort')} unknown requester port '{requester_proto.component_type_name}/{row.requester_port}'.")
+            continue
+        if provider_port.port_direction != "P" or requester_port.port_direction != "R":
+            errors.append(f"{loc(row, 'ConnectorType')} assembly connector must connect P provider to R requester.")
+        if provider_port.interface_kind != requester_port.interface_kind or provider_port.interface_ref != requester_port.interface_ref:
+            errors.append(f"{loc(row, 'ConnectorType')} connector endpoints must use the same interface kind and InterfaceRef.")
+
+    return errors
 
 
-def _write_platform_types(packages: etree._Element, data_types: list[DataTypeRow]) -> None:
-    base_pkg = _package(packages, "/AUTOSAR_Platform/BaseTypes")
-    base_elements = _elements(base_pkg)
-    needed = {_base_key(row.base_type) for row in data_types}
-    for base_key in sorted(needed):
-        short_name, size, encoding = BASE_TYPES[base_key]
-        base_type = _el(base_elements, "SW-BASE-TYPE", uuid=_uuid())
-        _el(base_type, "SHORT-NAME", short_name)
-        _el(base_type, "CATEGORY", "FIXED_LENGTH")
-        _el(base_type, "BASE-TYPE-SIZE", size)
-        _el(base_type, "BASE-TYPE-ENCODING", encoding)
-        _el(base_type, "NATIVE-DECLARATION", short_name)
+def _write_platform(packages: etree._Element, model: WorkbookV2Model) -> None:
+    used = {row.base_type.lower() for row in model.primitive_data_types if row.base_type}
+    for ref in [row.implementation_type_ref for row in model.data_type_mappings]:
+        name = _short(ref).lower()
+        if name in BASE_TYPES:
+            used.add(name)
+
+    base_elements = _elements(_package(packages, "/AUTOSAR_Platform/BaseTypes"))
+    impl_elements = _elements(_package(packages, "/AUTOSAR_Platform/ImplementationDataTypes"))
+    for key in sorted(used):
+        if key not in BASE_TYPES:
+            continue
+        name, size, encoding = BASE_TYPES[key]
+        base = _el(base_elements, "SW-BASE-TYPE", uuid=_uuid())
+        _el(base, "SHORT-NAME", name)
+        _el(base, "CATEGORY", "FIXED_LENGTH")
+        _el(base, "BASE-TYPE-SIZE", size)
+        _el(base, "BASE-TYPE-ENCODING", encoding)
+        _el(base, "NATIVE-DECLARATION", name)
+
+        impl = _el(impl_elements, "IMPLEMENTATION-DATA-TYPE", uuid=_uuid())
+        _el(impl, "SHORT-NAME", name)
+        _el(impl, "CATEGORY", "VALUE")
+        props = _sw_props(impl)
+        _el(props, "BASE-TYPE-REF", f"/AUTOSAR_Platform/BaseTypes/{name}", DEST="SW-BASE-TYPE")
+        _el(props, "SW-CALIBRATION-ACCESS", "READ-ONLY")
+        _el(impl, "TYPE-EMITTER", "RTE")
 
 
-def _write_data_types(packages: etree._Element, data_types: list[DataTypeRow]) -> None:
-    app_pkg = _package(packages, "/DataTypes/ApplicationDataTypes")
-    impl_pkg = _package(packages, "/DataTypes/ImplementationDataTypes")
-    compu_pkg = _package(packages, "/DataTypes/CompuMethods")
-    mapping_pkg = _package(packages, "/DataTypes/DataTypeMappings")
-    app_elements = _elements(app_pkg)
-    impl_elements = _elements(impl_pkg)
-    compu_elements = _elements(compu_pkg)
-    mapping_elements = _elements(mapping_pkg)
-
-    mapping_set = _el(mapping_elements, "DATA-TYPE-MAPPING-SET", uuid=_uuid())
-    _el(mapping_set, "SHORT-NAME", "DataTypeMappingsSet")
-    maps = _el(mapping_set, "DATA-TYPE-MAPS")
-    written_compu_methods: set[str] = set()
-
-    for row in data_types:
-        compu_name = row.compu_method or (f"{row.adt_name}_CompuMethod" if row.value_definition else "")
-
-        adt = _el(app_elements, "APPLICATION-PRIMITIVE-DATA-TYPE", uuid=_uuid())
-        _el(adt, "SHORT-NAME", row.adt_name)
-        _el(adt, "CATEGORY", "VALUE" if not _is_boolean(row.base_type) else "BOOLEAN")
-        props = _el(adt, "SW-DATA-DEF-PROPS")
-        variants = _el(props, "SW-DATA-DEF-PROPS-VARIANTS")
-        conditional = _el(variants, "SW-DATA-DEF-PROPS-CONDITIONAL")
-        _el(conditional, "SW-CALIBRATION-ACCESS", "READ-ONLY")
-        if compu_name:
-            _el(conditional, "COMPU-METHOD-REF", f"/DataTypes/CompuMethods/{compu_name}", DEST="COMPU-METHOD")
-
-        idt = _el(impl_elements, "IMPLEMENTATION-DATA-TYPE", uuid=_uuid())
-        _el(idt, "SHORT-NAME", row.idt_name)
-        _el(idt, "CATEGORY", "VALUE")
-        props = _el(idt, "SW-DATA-DEF-PROPS")
-        variants = _el(props, "SW-DATA-DEF-PROPS-VARIANTS")
-        conditional = _el(variants, "SW-DATA-DEF-PROPS-CONDITIONAL")
-        _el(conditional, "BASE-TYPE-REF", f"/AUTOSAR_Platform/BaseTypes/{_base_short_name(row.base_type)}", DEST="SW-BASE-TYPE")
-        _el(conditional, "SW-CALIBRATION-ACCESS", "READ-ONLY")
-        if compu_name:
-            _el(conditional, "COMPU-METHOD-REF", f"/DataTypes/CompuMethods/{compu_name}", DEST="COMPU-METHOD")
-        _el(idt, "TYPE-EMITTER", "RTE")
-
-        if compu_name and compu_name not in written_compu_methods:
-            _write_compu_method(compu_elements, compu_name, row)
-            written_compu_methods.add(compu_name)
-
-        type_map = _el(maps, "DATA-TYPE-MAP")
-        _el(type_map, "APPLICATION-DATA-TYPE-REF", f"/DataTypes/ApplicationDataTypes/{row.adt_name}", DEST="APPLICATION-PRIMITIVE-DATA-TYPE")
-        _el(type_map, "IMPLEMENTATION-DATA-TYPE-REF", f"/DataTypes/ImplementationDataTypes/{row.idt_name}", DEST="IMPLEMENTATION-DATA-TYPE")
+def _write_compu_methods(packages: etree._Element, model: WorkbookV2Model) -> None:
+    scales = defaultdict(list)
+    for row in model.compu_scales:
+        scales[row.compu_method_name].append(row)
+    for row in model.compu_methods:
+        elements = _elements(_package(packages, _pkg(row.compu_method_path)))
+        compu = _el(elements, "COMPU-METHOD", uuid=_uuid())
+        _el(compu, "SHORT-NAME", _short(row.compu_method_path) or row.compu_method_name)
+        _el(compu, "CATEGORY", row.category or "IDENTICAL")
+        if row.category.upper() == "TEXTTABLE":
+            internal = _el(compu, "COMPU-INTERNAL-TO-PHYS")
+            scale_node = _el(internal, "COMPU-SCALES")
+            for scale in scales.get(row.compu_method_name, []):
+                sc = _el(scale_node, "COMPU-SCALE")
+                _el(sc, "LOWER-LIMIT", scale.lower_limit, **{"INTERVAL-TYPE": "CLOSED"})
+                _el(sc, "UPPER-LIMIT", scale.upper_limit or scale.lower_limit, **{"INTERVAL-TYPE": "CLOSED"})
+                const = _el(sc, "COMPU-CONST")
+                _el(const, "VT", scale.text_value)
+        elif row.category.upper() == "LINEAR":
+            internal = _el(compu, "COMPU-INTERNAL-TO-PHYS")
+            scale_node = _el(internal, "COMPU-SCALES")
+            scale = scales.get(row.compu_method_name, [None])[0]
+            sc = _el(scale_node, "COMPU-SCALE")
+            coeffs = _el(sc, "COMPU-RATIONAL-COEFFS")
+            numerator = _el(coeffs, "COMPU-NUMERATOR")
+            _el(numerator, "V", (scale.offset if scale and scale.offset else "0"))
+            _el(numerator, "V", (scale.numerator if scale and scale.numerator else "1"))
+            denominator = _el(coeffs, "COMPU-DENOMINATOR")
+            _el(denominator, "V", (scale.denominator if scale and scale.denominator else "1"))
 
 
-def _write_compu_method(parent: etree._Element, name: str, row: DataTypeRow) -> None:
-    compu = _el(parent, "COMPU-METHOD", uuid=_uuid())
-    _el(compu, "SHORT-NAME", name)
-    _el(compu, "CATEGORY", "TEXTTABLE" if row.value_definition else "IDENTICAL")
-    if not row.value_definition:
+def _write_units(packages: etree._Element, model: WorkbookV2Model) -> None:
+    if not model.units:
         return
-    internal = _el(compu, "COMPU-INTERNAL-TO-PHYS")
-    scales = _el(internal, "COMPU-SCALES")
-    for raw, text in _parse_value_definition(row.value_definition):
-        scale = _el(scales, "COMPU-SCALE")
-        _el(scale, "LOWER-LIMIT", raw, **{"INTERVAL-TYPE": "CLOSED"})
-        _el(scale, "UPPER-LIMIT", raw, **{"INTERVAL-TYPE": "CLOSED"})
-        const = _el(scale, "COMPU-CONST")
-        _el(const, "VT", text)
-
-
-def _write_interfaces(packages: etree._Element, model: WorkbookModel) -> None:
-    sr_pkg = _package(packages, "/PortInterfaces/SRport")
-    cs_pkg = _package(packages, "/PortInterfaces/CSport")
-    sr_elements = _elements(sr_pkg)
-    cs_elements = _elements(cs_pkg)
-    operations_by_interface = _group_operations(model.operations)
-    first_arg_by_sr_interface = _sr_type_lookup(model)
-
-    for row in sorted(model.port_interfaces, key=lambda item: item.interface_name):
-        if row.interface_kind.upper() == "SR":
-            sr = _el(sr_elements, "SENDER-RECEIVER-INTERFACE", uuid=_uuid())
-            _el(sr, "SHORT-NAME", row.interface_name)
-            _el(sr, "IS-SERVICE", "false")
-            data_elements = _el(sr, "DATA-ELEMENTS")
-            variable = _el(data_elements, "VARIABLE-DATA-PROTOTYPE", uuid=_uuid())
-            _el(variable, "SHORT-NAME", row.data_element_name)
-            adt = first_arg_by_sr_interface.get(row.interface_name)
-            _el(variable, "TYPE-TREF", f"/DataTypes/ApplicationDataTypes/{adt}", DEST="APPLICATION-PRIMITIVE-DATA-TYPE")
-        else:
-            cs = _el(cs_elements, "CLIENT-SERVER-INTERFACE", uuid=_uuid())
-            _el(cs, "SHORT-NAME", row.interface_name)
-            _el(cs, "IS-SERVICE", "false")
-            operations = _el(cs, "OPERATIONS")
-            for operation_name, args in operations_by_interface[row.interface_name].items():
-                operation = _el(operations, "CLIENT-SERVER-OPERATION", uuid=_uuid())
-                _el(operation, "SHORT-NAME", operation_name)
-                args_node = _el(operation, "ARGUMENTS")
-                for arg in args:
-                    arg_node = _el(args_node, "ARGUMENT-DATA-PROTOTYPE", uuid=_uuid())
-                    _el(arg_node, "SHORT-NAME", arg.argument_name)
-                    _el(arg_node, "TYPE-TREF", f"/DataTypes/ApplicationDataTypes/{arg.argument_adt}", DEST="APPLICATION-PRIMITIVE-DATA-TYPE")
-                    _el(arg_node, "DIRECTION", arg.argument_direction.upper())
-                    _el(arg_node, "SERVER-ARGUMENT-IMPL-POLICY", "USE-ARGUMENT-TYPE")
-
-
-def _write_components(packages: etree._Element, model: WorkbookModel) -> None:
-    component_by_name = {row.component_name: row for row in model.components}
-    runnables_by_component = _group_by(model.runnables, lambda row: row.component_name)
-    events_by_component = _group_by(model.runnable_events, lambda row: row.component_name)
-    ports_by_component = _group_by(model.ports, lambda row: row.component_name)
-
-    for component in model.components:
-        pkg = _package(packages, component.package_path)
+    units_by_pkg: dict[str, list[UnitRow]] = defaultdict(list)
+    for row in model.units:
+        units_by_pkg[_pkg(row.unit_path or "/Units")].append(row)
+    for pkg_path, rows in units_by_pkg.items():
+        pkg = _package(packages, pkg_path)
         elements = _elements(pkg)
-        if component.is_composition:
-            comp = _el(elements, "COMPOSITION-SW-COMPONENT-TYPE", uuid=_uuid())
-            _el(comp, "SHORT-NAME", component.component_name)
-            _write_composition_content(comp, component, component_by_name, model)
+        for row in rows:
+            unit = _el(elements, "UNIT", uuid=_uuid())
+            _el(unit, "SHORT-NAME", row.unit_name)
+            if row.display_name:
+                _el(unit, "DISPLAY-NAME", row.display_name)
+            _el(unit, "FACTOR-SI-TO-UNIT", row.factor_si_to_unit or "1")
+            _el(unit, "OFFSET-SI-TO-UNIT", row.offset_si_to_unit or "0")
+
+
+def _write_data_constrs(packages: etree._Element, model: WorkbookV2Model) -> None:
+    for row in model.data_constrs:
+        elements = _elements(_package(packages, _pkg(row.data_constr_path)))
+        constr = _el(elements, "DATA-CONSTR", uuid=_uuid())
+        _el(constr, "SHORT-NAME", _short(row.data_constr_path) or row.data_constr_name)
+        rules = _el(constr, "DATA-CONSTR-RULES")
+        rule = _el(rules, "DATA-CONSTR-RULE")
+        internal = _el(rule, "INTERNAL-CONSTRS")
+        _el(internal, "LOWER-LIMIT", row.lower_limit, **{"INTERVAL-TYPE": "CLOSED"})
+        _el(internal, "UPPER-LIMIT", row.upper_limit, **{"INTERVAL-TYPE": "CLOSED"})
+
+
+def _write_application_types(packages: etree._Element, model: WorkbookV2Model) -> None:
+    for row in model.primitive_data_types:
+        elements = _elements(_package(packages, _pkg(row.application_type_path)))
+        adt = _el(elements, "APPLICATION-PRIMITIVE-DATA-TYPE", uuid=_uuid())
+        _el(adt, "SHORT-NAME", _short(row.application_type_path) or row.application_type_name)
+        _el(adt, "CATEGORY", "BOOLEAN" if row.base_type.lower() == "boolean" else "VALUE")
+        props = _sw_props(adt)
+        _el(props, "SW-CALIBRATION-ACCESS", row.calibration_access or "READ-ONLY")
+        if row.compu_method_ref:
+            _el(props, "COMPU-METHOD-REF", row.compu_method_ref, DEST="COMPU-METHOD")
+        if row.data_constr_ref:
+            _el(props, "DATA-CONSTR-REF", row.data_constr_ref, DEST="DATA-CONSTR")
+        if row.unit_ref:
+            _el(props, "UNIT-REF", row.unit_ref, DEST="UNIT")
+
+    elements_by_record = defaultdict(list)
+    for elem in model.record_elements:
+        elements_by_record[elem.record_type_name].append(elem)
+    for row in model.record_types:
+        elements = _elements(_package(packages, _pkg(row.application_type_path)))
+        record = _el(elements, "APPLICATION-RECORD-DATA-TYPE", uuid=_uuid())
+        _el(record, "SHORT-NAME", _short(row.application_type_path) or row.application_type_name)
+        _el(record, "CATEGORY", "STRUCTURE")
+        rec_elems = _el(record, "ELEMENTS")
+        for elem in sorted(elements_by_record.get(row.application_type_name, []), key=lambda item: int(item.order or 0)):
+            app_elem = _el(rec_elems, "APPLICATION-RECORD-ELEMENT", uuid=_uuid())
+            _el(app_elem, "SHORT-NAME", elem.element_name)
+            _el(app_elem, "CATEGORY", "VALUE")
+            _el(app_elem, "TYPE-TREF", elem.application_element_type_ref, DEST="APPLICATION-DATA-TYPE")
+
+
+def _write_custom_implementation_types(packages: etree._Element, model: WorkbookV2Model) -> None:
+    elements_by_record = defaultdict(list)
+    for elem in model.record_elements:
+        elements_by_record[elem.record_type_name].append(elem)
+    for row in model.record_types:
+        elements = _elements(_package(packages, _pkg(row.implementation_type_path)))
+        impl = _el(elements, "IMPLEMENTATION-DATA-TYPE", uuid=_uuid())
+        _el(impl, "SHORT-NAME", _short(row.implementation_type_path) or row.implementation_type_name)
+        _el(impl, "CATEGORY", "STRUCTURE")
+        subs = _el(impl, "SUB-ELEMENTS")
+        for elem in sorted(elements_by_record.get(row.application_type_name, []), key=lambda item: int(item.order or 0)):
+            sub = _el(subs, "IMPLEMENTATION-DATA-TYPE-ELEMENT", uuid=_uuid())
+            _el(sub, "SHORT-NAME", elem.element_name)
+            _el(sub, "CATEGORY", "TYPE_REFERENCE")
+            props = _sw_props(sub)
+            _el(props, "IMPLEMENTATION-DATA-TYPE-REF", elem.implementation_element_type_ref, DEST="IMPLEMENTATION-DATA-TYPE")
+        _el(impl, "TYPE-EMITTER", "RTE")
+
+
+def _write_mapping_sets(packages: etree._Element, model: WorkbookV2Model) -> None:
+    grouped = defaultdict(list)
+    default = model.config("DefaultMappingSetPath", "/ComponentTypes/MappingSets/APP_data_mapping")
+    for row in model.data_type_mappings:
+        grouped[row.mapping_set_path or default].append(row)
+    for path, rows in grouped.items():
+        elements = _elements(_package(packages, _pkg(path)))
+        mapping = _el(elements, "DATA-TYPE-MAPPING-SET", uuid=_uuid())
+        _el(mapping, "SHORT-NAME", _short(path))
+        maps = _el(mapping, "DATA-TYPE-MAPS")
+        for row in rows:
+            m = _el(maps, "DATA-TYPE-MAP")
+            _el(m, "APPLICATION-DATA-TYPE-REF", row.application_type_ref, DEST="APPLICATION-DATA-TYPE")
+            _el(m, "IMPLEMENTATION-DATA-TYPE-REF", row.implementation_type_ref, DEST="IMPLEMENTATION-DATA-TYPE")
+
+
+def _write_interfaces(packages: etree._Element, model: WorkbookV2Model) -> None:
+    sr_elements = defaultdict(list)
+    for row in model.sr_data_elements:
+        sr_elements[row.interface_name].append(row)
+    for row in model.sr_interfaces:
+        elements = _elements(_package(packages, _pkg(row.interface_path)))
+        iface = _el(elements, "SENDER-RECEIVER-INTERFACE", uuid=_uuid())
+        _el(iface, "SHORT-NAME", _short(row.interface_path) or row.interface_name)
+        _el(iface, "IS-SERVICE", row.is_service.lower())
+        data_elements = _el(iface, "DATA-ELEMENTS")
+        for de in sr_elements.get(row.interface_name, []):
+            var = _el(data_elements, "VARIABLE-DATA-PROTOTYPE", uuid=_uuid())
+            _el(var, "SHORT-NAME", de.data_element_name)
+            _el(var, "TYPE-TREF", de.application_type_ref, DEST="APPLICATION-DATA-TYPE")
+
+    args = defaultdict(list)
+    for row in model.cs_arguments:
+        args[(row.interface_name, row.operation_name)].append(row)
+    ops = defaultdict(list)
+    for row in model.cs_operations:
+        ops[row.interface_name].append(row)
+    for row in model.cs_interfaces:
+        elements = _elements(_package(packages, _pkg(row.interface_path)))
+        iface = _el(elements, "CLIENT-SERVER-INTERFACE", uuid=_uuid())
+        _el(iface, "SHORT-NAME", _short(row.interface_path) or row.interface_name)
+        _el(iface, "IS-SERVICE", row.is_service.lower())
+        operations = _el(iface, "OPERATIONS")
+        for op in ops.get(row.interface_name, []):
+            op_node = _el(operations, "CLIENT-SERVER-OPERATION", uuid=_uuid())
+            _el(op_node, "SHORT-NAME", op.operation_name)
+            arg_node = _el(op_node, "ARGUMENTS")
+            for arg in args.get((row.interface_name, op.operation_name), []):
+                a = _el(arg_node, "ARGUMENT-DATA-PROTOTYPE", uuid=_uuid())
+                _el(a, "SHORT-NAME", arg.argument_name)
+                _el(a, "TYPE-TREF", arg.application_type_ref, DEST="APPLICATION-DATA-TYPE")
+                _el(a, "DIRECTION", arg.direction)
+                _el(a, "SERVER-ARGUMENT-IMPL-POLICY", "USE-ARGUMENT-TYPE")
+
+
+def _write_components(packages: etree._Element, model: WorkbookV2Model) -> None:
+    ports_by_component = defaultdict(list)
+    for row in model.ports:
+        ports_by_component[row.component_name].append(row)
+    runnables_by_component = defaultdict(list)
+    for row in model.runnables:
+        runnables_by_component[row.component_name].append(row)
+    events_by_component = defaultdict(list)
+    for row in model.runnable_events:
+        events_by_component[row.component_name].append(row)
+    accesses_by_component = defaultdict(list)
+    for row in model.runnable_accesses:
+        accesses_by_component[row.component_name].append(row)
+
+    for comp in model.components:
+        elements = _elements(_package(packages, comp.package_path))
+        if comp.component_kind.lower() == "composition":
+            node = _el(elements, "COMPOSITION-SW-COMPONENT-TYPE", uuid=_uuid())
+            _el(node, "SHORT-NAME", comp.component_name)
+            _write_composition(node, comp, model)
         else:
-            swc = _el(elements, "APPLICATION-SW-COMPONENT-TYPE", uuid=_uuid())
-            _el(swc, "SHORT-NAME", component.component_name)
-            ports_node = _el(swc, "PORTS")
-            for port in ports_by_component.get(component.component_name, []):
-                _write_port(ports_node, port)
-            _write_internal_behavior(swc, component, runnables_by_component.get(component.component_name, []), events_by_component.get(component.component_name, []), ports_by_component.get(component.component_name, []))
+            node = _el(elements, "APPLICATION-SW-COMPONENT-TYPE", uuid=_uuid())
+            _el(node, "SHORT-NAME", comp.component_name)
+            ports = _el(node, "PORTS")
+            for port in ports_by_component.get(comp.component_name, []):
+                _write_port(ports, port)
+            _write_behavior(node, comp, model, runnables_by_component[comp.component_name], events_by_component[comp.component_name], accesses_by_component[comp.component_name])
 
 
-def _write_port(parent: etree._Element, port: PortRow) -> None:
+def _write_port(parent: etree._Element, port) -> None:
+    pdir = port.port_direction.upper()
     kind = port.interface_kind.upper()
-    direction = port.port_direction.upper()
-    if direction == "R":
-        node = _el(parent, "R-PORT-PROTOTYPE", uuid=_uuid())
-        _el(node, "SHORT-NAME", port.port_name)
+    node = _el(parent, "P-PORT-PROTOTYPE" if pdir == "P" else "R-PORT-PROTOTYPE", uuid=_uuid())
+    _el(node, "SHORT-NAME", port.port_name)
+    if pdir == "P":
+        specs = _el(node, "PROVIDED-COM-SPECS")
         if kind == "SR":
-            specs = _el(node, "REQUIRED-COM-SPECS")
-            spec = _el(specs, "NONQUEUED-RECEIVER-COM-SPEC")
-            _el(spec, "DATA-ELEMENT-REF", f"/PortInterfaces/SRport/{port.interface_name}/{port.data_element_name}", DEST="VARIABLE-DATA-PROTOTYPE")
-            _el(spec, "ALIVE-TIMEOUT", "0")
-            _el(spec, "ENABLE-UPDATE", "false")
-            _el(spec, "HANDLE-NEVER-RECEIVED", "false")
-            _el(node, "REQUIRED-INTERFACE-TREF", f"/PortInterfaces/SRport/{port.interface_name}", DEST="SENDER-RECEIVER-INTERFACE")
+            spec = _el(specs, port.com_spec_kind or "NONQUEUED-SENDER-COM-SPEC")
+            _el(spec, "DATA-ELEMENT-REF", f"{port.interface_ref}/{port.data_element_name}", DEST="VARIABLE-DATA-PROTOTYPE")
+            _init_value(spec, port.init_value or "0")
+            _el(node, "PROVIDED-INTERFACE-TREF", port.interface_ref, DEST="SENDER-RECEIVER-INTERFACE")
         else:
-            specs = _el(node, "REQUIRED-COM-SPECS")
-            spec = _el(specs, "CLIENT-COM-SPEC")
-            _el(spec, "OPERATION-REF", f"/PortInterfaces/CSport/{port.interface_name}/{port.operation_name}", DEST="CLIENT-SERVER-OPERATION")
-            _el(node, "REQUIRED-INTERFACE-TREF", f"/PortInterfaces/CSport/{port.interface_name}", DEST="CLIENT-SERVER-INTERFACE")
+            spec = _el(specs, port.com_spec_kind or "SERVER-COM-SPEC")
+            _el(spec, "OPERATION-REF", f"{port.interface_ref}/{port.operation_name}", DEST="CLIENT-SERVER-OPERATION")
+            _el(spec, "QUEUE-LENGTH", port.queue_length or "1")
+            _el(node, "PROVIDED-INTERFACE-TREF", port.interface_ref, DEST="CLIENT-SERVER-INTERFACE")
     else:
-        node = _el(parent, "P-PORT-PROTOTYPE", uuid=_uuid())
-        _el(node, "SHORT-NAME", port.port_name)
+        specs = _el(node, "REQUIRED-COM-SPECS")
         if kind == "SR":
-            specs = _el(node, "PROVIDED-COM-SPECS")
-            spec = _el(specs, "NONQUEUED-SENDER-COM-SPEC")
-            _el(spec, "DATA-ELEMENT-REF", f"/PortInterfaces/SRport/{port.interface_name}/{port.data_element_name}", DEST="VARIABLE-DATA-PROTOTYPE")
-            _el(node, "PROVIDED-INTERFACE-TREF", f"/PortInterfaces/SRport/{port.interface_name}", DEST="SENDER-RECEIVER-INTERFACE")
+            spec = _el(specs, port.com_spec_kind or "NONQUEUED-RECEIVER-COM-SPEC")
+            _el(spec, "DATA-ELEMENT-REF", f"{port.interface_ref}/{port.data_element_name}", DEST="VARIABLE-DATA-PROTOTYPE")
+            _el(spec, "ALIVE-TIMEOUT", port.alive_timeout or "0")
+            _el(spec, "ENABLE-UPDATE", (port.enable_update or "false").lower())
+            _init_value(spec, port.init_value or "0")
+            _el(spec, "HANDLE-NEVER-RECEIVED", "false")
+            _el(spec, "HANDLE-TIMEOUT-TYPE", port.handle_timeout_type or "NONE")
+            _el(node, "REQUIRED-INTERFACE-TREF", port.interface_ref, DEST="SENDER-RECEIVER-INTERFACE")
         else:
-            specs = _el(node, "PROVIDED-COM-SPECS")
-            spec = _el(specs, "SERVER-COM-SPEC")
-            _el(spec, "OPERATION-REF", f"/PortInterfaces/CSport/{port.interface_name}/{port.operation_name}", DEST="CLIENT-SERVER-OPERATION")
-            _el(spec, "QUEUE-LENGTH", "1")
-            _el(node, "PROVIDED-INTERFACE-TREF", f"/PortInterfaces/CSport/{port.interface_name}", DEST="CLIENT-SERVER-INTERFACE")
+            spec = _el(specs, port.com_spec_kind or "CLIENT-COM-SPEC")
+            _el(spec, "OPERATION-REF", f"{port.interface_ref}/{port.operation_name}", DEST="CLIENT-SERVER-OPERATION")
+            _el(node, "REQUIRED-INTERFACE-TREF", port.interface_ref, DEST="CLIENT-SERVER-INTERFACE")
 
 
-def _write_internal_behavior(parent: etree._Element, component: ComponentRow, runnables: list[RunnableRow], events: list[RunnableEventRow], ports: list[PortRow]) -> None:
+def _write_behavior(parent: etree._Element, comp, model: WorkbookV2Model, runnables, events, accesses) -> None:
     behavior = _el(_el(parent, "INTERNAL-BEHAVIORS"), "SWC-INTERNAL-BEHAVIOR", uuid=_uuid())
-    behavior_name = f"{component.component_name}_InternalBehavior"
+    behavior_name = comp.internal_behavior_name or f"{comp.component_name}_InternalBehavior"
     _el(behavior, "SHORT-NAME", behavior_name)
-    mapping_refs = _el(behavior, "DATA-TYPE-MAPPING-REFS")
-    _el(mapping_refs, "DATA-TYPE-MAPPING-REF", TYPE_MAPPING_REF, DEST="DATA-TYPE-MAPPING-SET")
+    maps = _el(behavior, "DATA-TYPE-MAPPING-REFS")
+    _el(maps, "DATA-TYPE-MAPPING-REF", model.config("DefaultMappingSetPath", "/ComponentTypes/MappingSets/APP_data_mapping"), DEST="DATA-TYPE-MAPPING-SET")
     events_node = _el(behavior, "EVENTS")
     runnables_node = _el(behavior, "RUNNABLES")
     _el(behavior, "SUPPORTS-MULTIPLE-INSTANTIATION", "false")
-    port_map = {port.port_name: port for port in ports}
+
+    accesses_by_runnable = defaultdict(list)
+    for access in accesses:
+        accesses_by_runnable[access.runnable_name].append(access)
+    ports = {row.port_name: row for row in model.ports if row.component_name == comp.component_name}
 
     for runnable in runnables:
-        node = _el(runnables_node, "RUNNABLE-ENTITY", uuid=_uuid())
-        _el(node, "SHORT-NAME", runnable.runnable_name)
-        _el(node, "MINIMUM-START-INTERVAL", "0")
-        _el(node, "CAN-BE-INVOKED-CONCURRENTLY", "false")
-        _el(node, "SYMBOL", runnable.symbol or runnable.runnable_name)
+        r = _el(runnables_node, "RUNNABLE-ENTITY", uuid=_uuid())
+        _el(r, "SHORT-NAME", runnable.runnable_name)
+        _el(r, "MINIMUM-START-INTERVAL", "0")
+        _el(r, "CAN-BE-INVOKED-CONCURRENTLY", "false")
+        _el(r, "SYMBOL", runnable.symbol or runnable.runnable_name)
+        call_points = [a for a in accesses_by_runnable.get(runnable.runnable_name, []) if a.access_type == "ServerCallPoint"]
+        if call_points:
+            cps = _el(r, "SERVER-CALL-POINTS")
+            for call in call_points:
+                p = ports[call.port_name]
+                sc = _el(cps, "SYNCHRONOUS-SERVER-CALL-POINT", uuid=_uuid())
+                _el(sc, "SHORT-NAME", call.access_name or f"SC_{call.port_name}_{call.operation_name}")
+                iref = _el(sc, "OPERATION-IREF")
+                _el(iref, "CONTEXT-R-PORT-REF", f"{comp.package_path}/{comp.component_name}/{call.port_name}", DEST="R-PORT-PROTOTYPE")
+                _el(iref, "TARGET-REQUIRED-OPERATION-REF", f"{p.interface_ref}/{call.operation_name}", DEST="CLIENT-SERVER-OPERATION")
+                _el(sc, "TIMEOUT", "0")
 
     for event in events:
-        runnable_ref = f"{component.package_path}/{component.component_name}/{behavior_name}/{event.runnable_name}"
-        trigger = _trigger_key(event.trigger_type)
-        if trigger == "init":
-            node = _el(events_node, "INIT-EVENT", uuid=_uuid())
-            _el(node, "SHORT-NAME", f"IE_{event.runnable_name}")
-            _el(node, "START-ON-EVENT-REF", runnable_ref, DEST="RUNNABLE-ENTITY")
-        elif trigger == "periodic":
-            node = _el(events_node, "TIMING-EVENT", uuid=_uuid())
-            _el(node, "SHORT-NAME", f"TE_{event.runnable_name}")
-            _el(node, "START-ON-EVENT-REF", runnable_ref, DEST="RUNNABLE-ENTITY")
-            _el(node, "PERIOD", _period_to_seconds(event.period_ms))
-        elif trigger == "operationinvoked":
-            port = port_map[event.port_name]
-            node = _el(events_node, "OPERATION-INVOKED-EVENT", uuid=_uuid())
-            _el(node, "SHORT-NAME", f"OIT_{event.runnable_name}_{event.operation_name}")
-            _el(node, "START-ON-EVENT-REF", runnable_ref, DEST="RUNNABLE-ENTITY")
-            iref = _el(node, "OPERATION-IREF")
-            _el(iref, "CONTEXT-P-PORT-REF", f"{component.package_path}/{component.component_name}/{event.port_name}", DEST="P-PORT-PROTOTYPE")
-            _el(iref, "TARGET-PROVIDED-OPERATION-REF", f"/PortInterfaces/CSport/{port.interface_name}/{event.operation_name}", DEST="CLIENT-SERVER-OPERATION")
-        elif trigger == "datareceived":
-            port = port_map[event.port_name]
-            node = _el(events_node, "DATA-RECEIVED-EVENT", uuid=_uuid())
-            _el(node, "SHORT-NAME", f"DRE_{event.runnable_name}_{event.port_name}")
-            _el(node, "START-ON-EVENT-REF", runnable_ref, DEST="RUNNABLE-ENTITY")
-            iref = _el(node, "DATA-IREF")
-            _el(iref, "CONTEXT-R-PORT-REF", f"{component.package_path}/{component.component_name}/{event.port_name}", DEST="R-PORT-PROTOTYPE")
-            _el(iref, "TARGET-DATA-ELEMENT-REF", f"/PortInterfaces/SRport/{port.interface_name}/{port.data_element_name}", DEST="VARIABLE-DATA-PROTOTYPE")
+        runnable_ref = f"{comp.package_path}/{comp.component_name}/{behavior_name}/{event.runnable_name}"
+        t = event.trigger_type
+        if t == "Init":
+            e = _el(events_node, "INIT-EVENT", uuid=_uuid())
+            _el(e, "SHORT-NAME", f"{event.runnable_name}_InitEvent")
+            _el(e, "START-ON-EVENT-REF", runnable_ref, DEST="RUNNABLE-ENTITY")
+        elif t == "Periodic":
+            e = _el(events_node, "TIMING-EVENT", uuid=_uuid())
+            _el(e, "SHORT-NAME", f"TMT_{event.runnable_name}")
+            _el(e, "START-ON-EVENT-REF", runnable_ref, DEST="RUNNABLE-ENTITY")
+            _el(e, "PERIOD", _period(event.period_ms))
+        elif t == "OperationInvoked":
+            p = ports[event.port_name]
+            e = _el(events_node, "OPERATION-INVOKED-EVENT", uuid=_uuid())
+            _el(e, "SHORT-NAME", f"OIT_{event.runnable_name}_{event.port_name}_{event.operation_name}")
+            _el(e, "START-ON-EVENT-REF", runnable_ref, DEST="RUNNABLE-ENTITY")
+            iref = _el(e, "OPERATION-IREF")
+            _el(iref, "CONTEXT-P-PORT-REF", f"{comp.package_path}/{comp.component_name}/{event.port_name}", DEST="P-PORT-PROTOTYPE")
+            _el(iref, "TARGET-PROVIDED-OPERATION-REF", f"{p.interface_ref}/{event.operation_name}", DEST="CLIENT-SERVER-OPERATION")
+        elif t == "DataReceived":
+            p = ports[event.port_name]
+            e = _el(events_node, "DATA-RECEIVED-EVENT", uuid=_uuid())
+            _el(e, "SHORT-NAME", f"DRT_{event.runnable_name}_{event.port_name}_{event.data_element_name}")
+            _el(e, "START-ON-EVENT-REF", runnable_ref, DEST="RUNNABLE-ENTITY")
+            iref = _el(e, "DATA-IREF")
+            _el(iref, "CONTEXT-R-PORT-REF", f"{comp.package_path}/{comp.component_name}/{event.port_name}", DEST="R-PORT-PROTOTYPE")
+            _el(iref, "TARGET-DATA-ELEMENT-REF", f"{p.interface_ref}/{event.data_element_name or p.data_element_name}", DEST="VARIABLE-DATA-PROTOTYPE")
 
 
-def _write_composition_content(parent: etree._Element, composition: ComponentRow, component_by_name: dict[str, ComponentRow], model: WorkbookModel) -> None:
-    components_node = _el(parent, "COMPONENTS")
-    for component in model.components:
-        if component.is_composition:
-            continue
-        proto = _el(components_node, "SW-COMPONENT-PROTOTYPE", uuid=_uuid())
-        _el(proto, "SHORT-NAME", component.component_name)
-        _el(proto, "TYPE-TREF", f"{component.package_path}/{component.component_name}", DEST="APPLICATION-SW-COMPONENT-TYPE")
-
-    connectors = [row for row in model.composition_connectors if row.composition_name in {"", composition.component_name}]
+def _write_composition(parent: etree._Element, comp, model: WorkbookV2Model) -> None:
+    protos = [row for row in model.component_prototypes if row.composition_name == comp.component_name]
+    proto_types = {row.prototype_name: row for row in protos}
+    comps = _el(parent, "COMPONENTS")
+    for proto in protos:
+        p = _el(comps, "SW-COMPONENT-PROTOTYPE", uuid=_uuid())
+        _el(p, "SHORT-NAME", proto.prototype_name)
+        _el(p, "TYPE-TREF", proto.component_type_ref, DEST="APPLICATION-SW-COMPONENT-TYPE")
+    connectors = [row for row in model.composition_connectors if row.composition_name == comp.component_name]
     if connectors:
-        connectors_node = _el(parent, "CONNECTORS")
+        nodes = _el(parent, "CONNECTORS")
+        component_by_name = {row.component_name: row for row in model.components}
         for row in connectors:
-            provider = component_by_name[row.provider_component]
-            requester = component_by_name[row.requester_component]
-            connector = _el(connectors_node, "ASSEMBLY-SW-CONNECTOR", uuid=_uuid())
-            _el(connector, "SHORT-NAME", f"{row.provider_component}_{row.provider_port}_TO_{row.requester_component}_{row.requester_port}")
-            provider_iref = _el(connector, "PROVIDER-IREF")
-            _el(provider_iref, "CONTEXT-COMPONENT-REF", f"{composition.package_path}/{composition.component_name}/{row.provider_component}", DEST="SW-COMPONENT-PROTOTYPE")
-            _el(provider_iref, "TARGET-P-PORT-REF", f"{provider.package_path}/{row.provider_component}/{row.provider_port}", DEST="P-PORT-PROTOTYPE")
-            requester_iref = _el(connector, "REQUESTER-IREF")
-            _el(requester_iref, "CONTEXT-COMPONENT-REF", f"{composition.package_path}/{composition.component_name}/{row.requester_component}", DEST="SW-COMPONENT-PROTOTYPE")
-            _el(requester_iref, "TARGET-R-PORT-REF", f"{requester.package_path}/{row.requester_component}/{row.requester_port}", DEST="R-PORT-PROTOTYPE")
+            provider_proto = proto_types[row.provider_prototype]
+            requester_proto = proto_types[row.requester_prototype]
+            provider_comp = component_by_name[provider_proto.component_type_name]
+            requester_comp = component_by_name[requester_proto.component_type_name]
+            c = _el(nodes, "ASSEMBLY-SW-CONNECTOR", uuid=_uuid())
+            _el(c, "SHORT-NAME", f"{row.provider_prototype}_{row.provider_port}_{row.requester_prototype}_{row.requester_port}")
+            pi = _el(c, "PROVIDER-IREF")
+            _el(pi, "CONTEXT-COMPONENT-REF", f"{comp.package_path}/{comp.component_name}/{row.provider_prototype}", DEST="SW-COMPONENT-PROTOTYPE")
+            _el(pi, "TARGET-P-PORT-REF", f"{provider_comp.package_path}/{provider_comp.component_name}/{row.provider_port}", DEST="P-PORT-PROTOTYPE")
+            ri = _el(c, "REQUESTER-IREF")
+            _el(ri, "CONTEXT-COMPONENT-REF", f"{comp.package_path}/{comp.component_name}/{row.requester_prototype}", DEST="SW-COMPONENT-PROTOTYPE")
+            _el(ri, "TARGET-R-PORT-REF", f"{requester_comp.package_path}/{requester_comp.component_name}/{row.requester_port}", DEST="R-PORT-PROTOTYPE")
 
 
-def _group_operations(rows: list[OperationRow]) -> dict[str, dict[str, list[OperationRow]]]:
-    result: dict[str, dict[str, list[OperationRow]]] = defaultdict(lambda: defaultdict(list))
-    for row in rows:
-        result[row.interface_name][row.operation_name].append(row)
-    return result
+def _init_value(parent: etree._Element, value: str) -> None:
+    init = _el(parent, "INIT-VALUE")
+    spec = _el(init, "APPLICATION-VALUE-SPECIFICATION")
+    _el(spec, "CATEGORY", "VALUE")
+    sw_vc = _el(spec, "SW-VALUE-CONT")
+    sw_phys = _el(sw_vc, "SW-VALUES-PHYS")
+    _el(sw_phys, "V", value)
 
 
-def _sr_type_lookup(model: WorkbookModel) -> dict[str, str]:
-    lookup: dict[str, str] = {}
-    for iface in model.port_interfaces:
-        if iface.interface_kind.upper() != "SR":
-            continue
-        lookup[iface.interface_name] = iface.data_type_adt
-    return lookup
+def _sw_props(parent: etree._Element) -> etree._Element:
+    props = _el(parent, "SW-DATA-DEF-PROPS")
+    variants = _el(props, "SW-DATA-DEF-PROPS-VARIANTS")
+    return _el(variants, "SW-DATA-DEF-PROPS-CONDITIONAL")
 
 
-def _group_by(rows, key_func):
-    grouped = defaultdict(list)
-    for row in rows:
-        grouped[key_func(row)].append(row)
-    return grouped
+def _period(ms: str) -> str:
+    return f"{float(ms or '10') / 1000:.6f}".rstrip("0").rstrip(".")
 
 
-def _parse_value_definition(value: str) -> list[tuple[str, str]]:
-    pairs: list[tuple[str, str]] = []
-    for part in value.replace("\n", ";").split(";"):
-        item = part.strip()
-        if not item:
-            continue
-        if ":" in item:
-            raw, text = item.split(":", 1)
-        elif "=" in item:
-            raw, text = item.split("=", 1)
-        else:
-            raw, text = item, item
-        pairs.append((raw.strip(), text.strip()))
-    return pairs
+def _pkg(path: str) -> str:
+    parts = path.strip("/").split("/")
+    return "/" + "/".join(parts[:-1])
 
 
-def _require_unique(result: ValidationResult, label: str, values: list[str]) -> None:
-    seen: set[str] = set()
-    for value in values:
-        if not value:
-            continue
-        if value in seen:
-            result.errors.append(f"{label} '{value}' is duplicated.")
-        seen.add(value)
-
-
-def _require_unique_rows(result: ValidationResult, label: str, rows, key_func, field: str) -> None:
-    seen: dict[str, object] = {}
-    for row in rows:
-        value = key_func(row)
-        if not value:
-            continue
-        if value in seen:
-            _error(result, row, field, f"{label} '{value}' is duplicated.")
-        else:
-            seen[value] = row
-
-
-def _error(result: ValidationResult, row, field: str, message: str) -> None:
-    result.errors.append(f"{_loc(row, field)}{message}")
-
-
-def _warning(result: ValidationResult, row, field: str, message: str) -> None:
-    result.warnings.append(f"{_loc(row, field)}{message}")
-
-
-def _loc(row, field: str) -> str:
-    sheet = getattr(row, "source_sheet", "")
-    row_index = getattr(row, "row_index", 0)
-    if sheet and row_index:
-        return f"{sheet}!R{row_index} {field}: "
-    return f"{field}: " if field else ""
-
-
-def _validate_short_name(
-    result: ValidationResult,
-    row,
-    value: str,
-    field: str,
-    *,
-    allow_blank: bool = False,
-) -> None:
-    if not value:
-        if not allow_blank:
-            _error(result, row, field, f"{field} is required.")
-        return
-    if not SHORT_NAME_RE.match(value):
-        _error(
-            result,
-            row,
-            field,
-            f"'{value}' is not a valid AUTOSAR SHORT-NAME. Use letters, digits and underscore, and do not start with a digit.",
-        )
-
-
-def _validate_package_path(result: ValidationResult, row, package_path: str) -> None:
-    if not package_path:
-        _error(result, row, "PackagePath", "PackagePath is required.")
-        return
-    for token in [part for part in package_path.strip("/").split("/") if part]:
-        if not SHORT_NAME_RE.match(token):
-            _error(result, row, "PackagePath", f"package token '{token}' is not a valid AUTOSAR SHORT-NAME.")
+def _short(path: str) -> str:
+    return path.strip("/").split("/")[-1] if path else ""
 
 
 def _uuid() -> str:
@@ -670,41 +662,37 @@ def _uuid() -> str:
 
 
 def _el(parent: etree._Element, name: str, text: str | None = None, **attrs: str) -> etree._Element:
-    element = etree.SubElement(parent, f"{{{NS}}}{name}")
+    node = etree.SubElement(parent, f"{{{NS}}}{name}")
     for key, value in attrs.items():
-        if key == "uuid":
-            element.set("UUID", value)
-        else:
-            element.set(key, value)
+        node.set("UUID" if key == "uuid" else key, value)
     if text is not None:
-        element.text = text
-    return element
+        node.text = text
+    return node
 
 
 def _package(root_packages: etree._Element, path: str) -> etree._Element:
-    parts = [part for part in path.strip("/").split("/") if part]
-    current_parent = root_packages
-    current_pkg = None
-    for part in parts:
+    parent = root_packages
+    current = None
+    for part in [p for p in path.strip("/").split("/") if p]:
         found = None
-        for candidate in current_parent.findall(f"{{{NS}}}AR-PACKAGE"):
+        for candidate in parent.findall(f"{{{NS}}}AR-PACKAGE"):
             sn = candidate.find(f"{{{NS}}}SHORT-NAME")
             if sn is not None and sn.text == part:
                 found = candidate
                 break
         if found is None:
-            found = _el(current_parent, "AR-PACKAGE")
+            found = _el(parent, "AR-PACKAGE")
             _el(found, "SHORT-NAME", part)
             _el(found, "ELEMENTS")
             _el(found, "AR-PACKAGES")
-        current_pkg = found
-        nested = current_pkg.find(f"{{{NS}}}AR-PACKAGES")
+        current = found
+        nested = current.find(f"{{{NS}}}AR-PACKAGES")
         if nested is None:
-            nested = _el(current_pkg, "AR-PACKAGES")
-        current_parent = nested
-    if current_pkg is None:
+            nested = _el(current, "AR-PACKAGES")
+        parent = nested
+    if current is None:
         raise ValueError(f"Invalid package path: {path}")
-    return current_pkg
+    return current
 
 
 def _elements(pkg: etree._Element) -> etree._Element:
@@ -712,33 +700,3 @@ def _elements(pkg: etree._Element) -> etree._Element:
     if elements is None:
         elements = _el(pkg, "ELEMENTS")
     return elements
-
-
-def _base_key(value: str) -> str:
-    return value.strip().lower()
-
-
-def _base_short_name(value: str) -> str:
-    return BASE_TYPES[_base_key(value)][0]
-
-
-def _is_boolean(value: str) -> bool:
-    return _base_key(value) in {"boolean", "bool"}
-
-
-def _matlab_base_type(value: str) -> str:
-    base_key = _base_key(value)
-    if base_key == "bool":
-        return "boolean"
-    return "single" if base_key == "float32" else base_key
-
-
-def _trigger_key(value: str) -> str:
-    return value.strip().replace(" ", "").replace("_", "").lower()
-
-
-def _period_to_seconds(period_ms: str) -> str:
-    if not period_ms:
-        return "0.01"
-    value = float(period_ms)
-    return f"{value / 1000:.6f}".rstrip("0").rstrip(".")

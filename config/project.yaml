@@ -1,28 +1,12 @@
-project_name: ww_arxml_codegen
+project_name: arxml_codegen
+schema_version: v2
 
 excel:
-  workbook: data/input/arxml_input_template.xlsx
-  sheets:
-    components: Components
-    data_types: DataTypes
-    port_interfaces: PortInterfaces
-    operations: Operations
-    ports: Ports
-    runnables: Runnables
-    runnable_events: RunnableEvents
-    composition_connectors: CompositionConnectors
-
-template:
-  arxml: C:/Users/20261/Downloads/WW0428.arxml
+  workbook: data/input/WW_SWC_Design_v2.xlsx
 
 generation:
   mode: workbook_to_arxml
-  output: output/generated_from_excel.arxml
+  output: output/generated_ww_swc.arxml
   report: output/generation_report.md
   matlab_init: output/init_autosar_types.m
   autosar_version: 4-3-0
-
-rules:
-  use_template_style: false
-  keep_existing_ports: false
-  create_missing_sr_interfaces: true

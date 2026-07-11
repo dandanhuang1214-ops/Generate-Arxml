@@ -1,254 +1,158 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Iterable
 
 from openpyxl import load_workbook
 
 from arxml_codegen.models.schema import (
-    ComponentRow,
-    CompositionConnectorRow,
-    DataTypeRow,
-    OperationRow,
-    PortInterfaceRow,
-    PortRow,
-    RunnableEventRow,
-    RunnableRow,
-    WorkbookModel,
+    CSArgumentRow,
+    CSInterfaceRow,
+    CSOperationRow,
+    CompuMethodRow,
+    CompuScaleRow,
+    ComponentPrototypeRow,
+    ComponentV2Row,
+    CompositionConnectorV2Row,
+    DataConstrRow,
+    DataTypeMappingRow,
+    PrimitiveDataTypeRow,
+    ProjectConfigRow,
+    RecordElementRow,
+    RecordTypeRow,
+    RunnableAccessRow,
+    RunnableEventV2Row,
+    RunnableV2Row,
+    SRDataElementRow,
+    SRInterfaceRow,
+    UnitRow,
+    PortV2Row,
+    WorkbookV2Model,
 )
 
 
-SHEET_ALIASES = {
-    "Components": ("Components",),
-    "DataTypes": ("DataTypes",),
-    "PortInterfaces": ("PortInterfaces",),
-    "Operations": ("Operations", "Arguments"),
-    "Ports": ("Ports",),
-    "Runnables": ("Runnables",),
-    "RunnableEvents": ("RunnableEvents",),
-    "CompositionConnectors": ("CompositionConnectors", "Connectors"),
-}
-
-
 def _normalize(value: object) -> str:
-    if value is None:
-        return ""
-    return str(value).strip()
+    return "" if value is None else str(value).strip()
 
 
-def _bool(value: str) -> bool:
-    return value.strip().lower() in {"1", "true", "yes", "y", "是", "composition"}
-
-
-def _sheet_rows(worksheet) -> list[list[str]]:
-    rows: list[list[str]] = []
-    for row in worksheet.iter_rows(values_only=True):
-        rows.append([_normalize(cell) for cell in row])
-    return rows
-
-
-def _header_index(header_row: list[str]) -> dict[str, int]:
-    return {name: idx for idx, name in enumerate(header_row) if name}
-
-
-def _cell(row: list[str], mapping: dict[str, int], *keys: str) -> str:
-    for key in keys:
-        idx = mapping.get(key)
-        if idx is not None and idx < len(row):
-            return row[idx]
-    return ""
-
-
-def _nonempty(row: Iterable[str]) -> bool:
-    return any(cell for cell in row)
-
-
-def _rows_for(workbook, logical_name: str) -> tuple[str, list[list[str]]]:
-    for sheet_name in SHEET_ALIASES[logical_name]:
-        if sheet_name in workbook.sheetnames:
-            return sheet_name, _sheet_rows(workbook[sheet_name])
-    return "", []
-
-
-def _iter_data_rows(workbook, logical_name: str):
-    sheet_name, rows = _rows_for(workbook, logical_name)
+def _rows(workbook, sheet_name: str):
+    if sheet_name not in workbook.sheetnames:
+        return
+    sheet = workbook[sheet_name]
+    rows = [[_normalize(cell) for cell in row] for row in sheet.iter_rows(values_only=True)]
     if not rows:
         return
-    header = _header_index(rows[0])
+    header = {name: idx for idx, name in enumerate(rows[0]) if name}
     for row_index, row in enumerate(rows[1:], start=2):
-        if _nonempty(row):
+        if any(row):
             yield sheet_name, row_index, header, row
 
 
-def load_workbook_model(path: Path) -> WorkbookModel:
+def _cell(row: list[str], header: dict[str, int], key: str) -> str:
+    idx = header.get(key)
+    if idx is None or idx >= len(row):
+        return ""
+    return row[idx]
+
+
+def load_workbook_v2(path: Path) -> WorkbookV2Model:
     workbook = load_workbook(path, data_only=True)
-    model = WorkbookModel()
+    model = WorkbookV2Model()
 
-    for sheet_name, row_index, header, row in _iter_data_rows(workbook, "Components") or []:
-        kind = _cell(row, header, "ComponentKind", "ComponentCategory")
-        component_name = _cell(row, header, "ComponentName")
-        is_composition = _bool(_cell(row, header, "IsComposition")) or kind.lower() == "composition"
+    for sheet, row_index, header, row in _rows(workbook, "ProjectConfig") or []:
+        model.project_config.append(ProjectConfigRow(sheet, row_index, _cell(row, header, "Key"), _cell(row, header, "Value")))
+
+    for sheet, row_index, header, row in _rows(workbook, "Components") or []:
         model.components.append(
-            ComponentRow(
-                component_name=component_name,
-                component_kind=kind or ("Composition" if is_composition else "Application"),
-                package_path=_cell(row, header, "PackagePath") or "/ComponentTypes",
-                is_composition=is_composition,
-                description=_cell(row, header, "Description"),
-                source_sheet=sheet_name,
+            ComponentV2Row(
+                source_sheet=sheet,
                 row_index=row_index,
+                component_name=_cell(row, header, "ComponentName"),
+                component_kind=_cell(row, header, "ComponentKind") or "Application",
+                package_path=_cell(row, header, "PackagePath"),
+                internal_behavior_name=_cell(row, header, "InternalBehaviorName"),
+                implementation_name=_cell(row, header, "ImplementationName"),
             )
         )
 
-    for sheet_name, row_index, header, row in _iter_data_rows(workbook, "DataTypes") or []:
-        model.data_types.append(
-            DataTypeRow(
-                adt_name=_cell(row, header, "ADTName", "DataType", "TypeName"),
-                idt_name=_cell(row, header, "IDTName"),
+    for sheet, row_index, header, row in _rows(workbook, "ComponentPrototypes") or []:
+        model.component_prototypes.append(
+            ComponentPrototypeRow(sheet, row_index, _cell(row, header, "CompositionName"), _cell(row, header, "PrototypeName"), _cell(row, header, "ComponentTypeName"), _cell(row, header, "ComponentTypeRef"))
+        )
+
+    for sheet, row_index, header, row in _rows(workbook, "PrimitiveDataTypes") or []:
+        model.primitive_data_types.append(
+            PrimitiveDataTypeRow(
+                source_sheet=sheet,
+                row_index=row_index,
+                application_type_name=_cell(row, header, "ApplicationTypeName"),
+                application_type_path=_cell(row, header, "ApplicationTypePath"),
+                implementation_type_name=_cell(row, header, "ImplementationTypeName"),
+                implementation_type_path=_cell(row, header, "ImplementationTypePath"),
                 base_type=_cell(row, header, "BaseType"),
-                is_enum=_bool(_cell(row, header, "IsEnum")),
-                compu_method=_cell(row, header, "CompuMethod"),
-                value_definition=_cell(row, header, "ValueDefinition", "ValueMap"),
-                description=_cell(row, header, "Description"),
-                source_sheet=sheet_name,
-                row_index=row_index,
+                compu_method_ref=_cell(row, header, "CompuMethodRef"),
+                data_constr_ref=_cell(row, header, "DataConstrRef"),
+                calibration_access=_cell(row, header, "CalibrationAccess") or "READ-ONLY",
+                unit_ref=_cell(row, header, "UnitRef"),
             )
         )
 
-    for sheet_name, row_index, header, row in _iter_data_rows(workbook, "PortInterfaces") or []:
-        model.port_interfaces.append(
-            PortInterfaceRow(
-                interface_name=_cell(row, header, "InterfaceName"),
-                interface_kind=_cell(row, header, "InterfaceKind", "PortInterfaceKind"),
-                data_element_name=_cell(row, header, "DataElementName"),
-                data_type_adt=_cell(row, header, "DataTypeADT", "DataType"),
-                operation_name=_cell(row, header, "OperationName"),
-                description=_cell(row, header, "Description"),
-                source_sheet=sheet_name,
-                row_index=row_index,
-            )
+    for sheet, row_index, header, row in _rows(workbook, "RecordTypes") or []:
+        model.record_types.append(
+            RecordTypeRow(sheet, row_index, _cell(row, header, "ApplicationTypeName"), _cell(row, header, "ApplicationTypePath"), _cell(row, header, "ImplementationTypeName"), _cell(row, header, "ImplementationTypePath"), _cell(row, header, "CalibrationAccess") or "READ-ONLY")
         )
 
-    for sheet_name, row_index, header, row in _iter_data_rows(workbook, "Operations") or []:
-        model.operations.append(
-            OperationRow(
-                interface_name=_cell(row, header, "InterfaceName"),
-                operation_name=_cell(row, header, "OperationName"),
-                argument_name=_cell(row, header, "ArgumentName"),
-                argument_direction=_cell(row, header, "ArgumentDirection"),
-                argument_adt=_cell(row, header, "ArgumentADT", "ArgumentType"),
-                description=_cell(row, header, "Description"),
-                source_sheet=sheet_name,
-                row_index=row_index,
-            )
+    for sheet, row_index, header, row in _rows(workbook, "RecordElements") or []:
+        model.record_elements.append(
+            RecordElementRow(sheet, row_index, _cell(row, header, "RecordTypeName"), _cell(row, header, "ElementName"), _cell(row, header, "ApplicationElementTypeRef"), _cell(row, header, "ImplementationElementTypeRef"), _cell(row, header, "Order"))
         )
 
-    for sheet_name, row_index, header, row in _iter_data_rows(workbook, "Ports") or []:
+    for sheet, row_index, header, row in _rows(workbook, "DataTypeMappings") or []:
+        model.data_type_mappings.append(
+            DataTypeMappingRow(sheet, row_index, _cell(row, header, "MappingSetPath"), _cell(row, header, "ApplicationTypeRef"), _cell(row, header, "ImplementationTypeRef"))
+        )
+
+    for sheet, row_index, header, row in _rows(workbook, "CompuMethods") or []:
+        model.compu_methods.append(CompuMethodRow(sheet, row_index, _cell(row, header, "CompuMethodName"), _cell(row, header, "CompuMethodPath"), _cell(row, header, "Category") or "IDENTICAL"))
+
+    for sheet, row_index, header, row in _rows(workbook, "CompuScales") or []:
+        model.compu_scales.append(CompuScaleRow(sheet, row_index, _cell(row, header, "CompuMethodName"), _cell(row, header, "LowerLimit"), _cell(row, header, "UpperLimit"), _cell(row, header, "TextValue"), _cell(row, header, "Numerator"), _cell(row, header, "Denominator"), _cell(row, header, "Offset")))
+
+    for sheet, row_index, header, row in _rows(workbook, "DataConstrs") or []:
+        model.data_constrs.append(DataConstrRow(sheet, row_index, _cell(row, header, "DataConstrName"), _cell(row, header, "DataConstrPath"), _cell(row, header, "LowerLimit"), _cell(row, header, "UpperLimit")))
+
+    for sheet, row_index, header, row in _rows(workbook, "SRInterfaces") or []:
+        model.sr_interfaces.append(SRInterfaceRow(sheet, row_index, _cell(row, header, "InterfaceName"), _cell(row, header, "InterfacePath"), _cell(row, header, "IsService") or "false"))
+
+    for sheet, row_index, header, row in _rows(workbook, "SRDataElements") or []:
+        model.sr_data_elements.append(SRDataElementRow(sheet, row_index, _cell(row, header, "InterfaceName"), _cell(row, header, "DataElementName"), _cell(row, header, "ApplicationTypeRef")))
+
+    for sheet, row_index, header, row in _rows(workbook, "CSInterfaces") or []:
+        model.cs_interfaces.append(CSInterfaceRow(sheet, row_index, _cell(row, header, "InterfaceName"), _cell(row, header, "InterfacePath"), _cell(row, header, "IsService") or "false"))
+
+    for sheet, row_index, header, row in _rows(workbook, "CSOperations") or []:
+        model.cs_operations.append(CSOperationRow(sheet, row_index, _cell(row, header, "InterfaceName"), _cell(row, header, "OperationName")))
+
+    for sheet, row_index, header, row in _rows(workbook, "CSArguments") or []:
+        model.cs_arguments.append(CSArgumentRow(sheet, row_index, _cell(row, header, "InterfaceName"), _cell(row, header, "OperationName"), _cell(row, header, "ArgumentName"), _cell(row, header, "Direction"), _cell(row, header, "ApplicationTypeRef")))
+
+    for sheet, row_index, header, row in _rows(workbook, "Ports") or []:
         model.ports.append(
-            PortRow(
-                component_name=_cell(row, header, "ComponentName"),
-                port_name=_cell(row, header, "PortName"),
-                port_direction=_cell(row, header, "PortDirection"),
-                interface_kind=_cell(row, header, "InterfaceKind", "PortInterfaceKind"),
-                interface_name=_cell(row, header, "InterfaceName"),
-                data_element_name=_cell(row, header, "DataElementName"),
-                operation_name=_cell(row, header, "OperationName"),
-                init_value=_cell(row, header, "InitValue"),
-                com_spec_type=_cell(row, header, "ComSpecType") or "nonqueued",
-                description=_cell(row, header, "Description"),
-                source_sheet=sheet_name,
-                row_index=row_index,
-            )
+            PortV2Row(sheet, row_index, _cell(row, header, "ComponentName"), _cell(row, header, "PortName"), _cell(row, header, "PortDirection"), _cell(row, header, "InterfaceKind"), _cell(row, header, "InterfaceRef"), _cell(row, header, "DataElementName"), _cell(row, header, "OperationName"), _cell(row, header, "ComSpecKind"), _cell(row, header, "AliveTimeout"), _cell(row, header, "QueueLength"), _cell(row, header, "EnableUpdate"), _cell(row, header, "HandleTimeoutType"), _cell(row, header, "InitValue"))
         )
 
-    for sheet_name, row_index, header, row in _iter_data_rows(workbook, "Runnables") or []:
-        model.runnables.append(
-            RunnableRow(
-                component_name=_cell(row, header, "ComponentName"),
-                runnable_name=_cell(row, header, "RunnableName"),
-                symbol=_cell(row, header, "Symbol") or _cell(row, header, "RunnableName"),
-                description=_cell(row, header, "Description"),
-                source_sheet=sheet_name,
-                row_index=row_index,
-            )
-        )
+    for sheet, row_index, header, row in _rows(workbook, "Runnables") or []:
+        model.runnables.append(RunnableV2Row(sheet, row_index, _cell(row, header, "ComponentName"), _cell(row, header, "RunnableName"), _cell(row, header, "Symbol")))
 
-        # Backward compatibility with the older template where events lived in Runnables.
-        trigger = _cell(row, header, "TriggerType")
-        if trigger:
-            model.runnable_events.append(
-                RunnableEventRow(
-                    component_name=_cell(row, header, "ComponentName"),
-                    runnable_name=_cell(row, header, "RunnableName"),
-                    trigger_type=trigger,
-                    period_ms=_cell(row, header, "PeriodMs"),
-                    port_name=_cell(row, header, "PortName"),
-                    operation_name=_cell(row, header, "OperationName"),
-                    description=_cell(row, header, "Description"),
-                    source_sheet=sheet_name,
-                    row_index=row_index,
-                )
-            )
+    for sheet, row_index, header, row in _rows(workbook, "RunnableEvents") or []:
+        model.runnable_events.append(RunnableEventV2Row(sheet, row_index, _cell(row, header, "ComponentName"), _cell(row, header, "RunnableName"), _cell(row, header, "TriggerType"), _cell(row, header, "PeriodMs"), _cell(row, header, "PortName"), _cell(row, header, "OperationName"), _cell(row, header, "DataElementName")))
 
-    for sheet_name, row_index, header, row in _iter_data_rows(workbook, "RunnableEvents") or []:
-        model.runnable_events.append(
-            RunnableEventRow(
-                component_name=_cell(row, header, "ComponentName"),
-                runnable_name=_cell(row, header, "RunnableName"),
-                trigger_type=_cell(row, header, "TriggerType"),
-                period_ms=_cell(row, header, "PeriodMs"),
-                port_name=_cell(row, header, "PortName"),
-                operation_name=_cell(row, header, "OperationName"),
-                data_element_name=_cell(row, header, "DataElementName"),
-                description=_cell(row, header, "Description"),
-                source_sheet=sheet_name,
-                row_index=row_index,
-            )
-        )
+    for sheet, row_index, header, row in _rows(workbook, "RunnableAccesses") or []:
+        model.runnable_accesses.append(RunnableAccessRow(sheet, row_index, _cell(row, header, "ComponentName"), _cell(row, header, "RunnableName"), _cell(row, header, "AccessType"), _cell(row, header, "PortName"), _cell(row, header, "OperationName"), _cell(row, header, "DataElementName"), _cell(row, header, "AccessName")))
 
-    for sheet_name, row_index, header, row in _iter_data_rows(workbook, "CompositionConnectors") or []:
-        model.composition_connectors.append(
-            CompositionConnectorRow(
-                composition_name=_cell(row, header, "CompositionName"),
-                provider_component=_cell(row, header, "ProviderComponent"),
-                provider_port=_cell(row, header, "ProviderPort"),
-                requester_component=_cell(row, header, "RequesterComponent"),
-                requester_port=_cell(row, header, "RequesterPort"),
-                connector_type=_cell(row, header, "ConnectorType") or "Assembly",
-                description=_cell(row, header, "Description"),
-                source_sheet=sheet_name,
-                row_index=row_index,
-            )
-        )
+    for sheet, row_index, header, row in _rows(workbook, "CompositionConnectors") or []:
+        model.composition_connectors.append(CompositionConnectorV2Row(sheet, row_index, _cell(row, header, "CompositionName"), _cell(row, header, "ProviderPrototype"), _cell(row, header, "ProviderPort"), _cell(row, header, "RequesterPrototype"), _cell(row, header, "RequesterPort"), _cell(row, header, "ConnectorType") or "Assembly"))
 
-    _infer_missing_data(model)
+    for sheet, row_index, header, row in _rows(workbook, "Units") or []:
+        model.units.append(UnitRow(sheet, row_index, _cell(row, header, "UnitName"), _cell(row, header, "UnitPath"), _cell(row, header, "DisplayName"), _cell(row, header, "FactorSIToUnit") or "1", _cell(row, header, "OffsetSIToUnit") or "0"))
+
     return model
-
-
-def _infer_missing_data(model: WorkbookModel) -> None:
-    if not model.port_interfaces:
-        seen: set[tuple[str, str]] = set()
-        for port in model.ports:
-            key = (port.interface_kind.upper(), port.interface_name)
-            if port.interface_name and key not in seen:
-                seen.add(key)
-                model.port_interfaces.append(
-                    PortInterfaceRow(
-                        interface_name=port.interface_name,
-                        interface_kind=port.interface_kind,
-                        data_element_name=port.data_element_name,
-                        data_type_adt="",
-                        operation_name=port.operation_name,
-                    )
-                )
-
-    if not model.data_types:
-        type_names: set[str] = {operation.argument_adt for operation in model.operations}
-        for type_name in sorted(t for t in type_names if t):
-            model.data_types.append(
-                DataTypeRow(
-                    adt_name=type_name,
-                    idt_name=type_name.replace("ADT_", "IDT_", 1),
-                    base_type="uint8",
-                )
-            )

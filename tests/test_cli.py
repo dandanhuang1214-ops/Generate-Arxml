@@ -1,38 +1,64 @@
 from arxml_codegen.cli import build_parser
-from arxml_codegen.excel.template import create_template
-from arxml_codegen.generator.arxml_writer import validate_model
+from arxml_codegen.excel.template import create_template_v2
+from arxml_codegen.excel.reader import load_workbook_v2
+from arxml_codegen.generator.arxml_writer import (
+    build_arxml_v2,
+    validate_model_v2,
+)
 from arxml_codegen.models.schema import (
-    ComponentRow,
-    CompositionConnectorRow,
-    DataTypeRow,
-    PortInterfaceRow,
-    PortRow,
-    RunnableRow,
-    WorkbookModel,
+    ComponentPrototypeRow,
+    ComponentV2Row,
+    CompositionConnectorV2Row,
+    CSArgumentRow,
+    CSInterfaceRow,
+    CSOperationRow,
+    PortV2Row,
+    PrimitiveDataTypeRow,
+    RunnableV2Row,
+    SRDataElementRow,
+    SRInterfaceRow,
+    WorkbookV2Model,
 )
 
 
-def _base_model() -> WorkbookModel:
-    return WorkbookModel(
+def _base_model() -> WorkbookV2Model:
+    return WorkbookV2Model(
         components=[
-            ComponentRow("Enh", "Application", "/ComponentTypes", source_sheet="Components", row_index=2),
-            ComponentRow("Atm", "Application", "/ComponentTypes", source_sheet="Components", row_index=3),
+            ComponentV2Row("Components", 2, "Enh", "Application", "/ComponentTypes", "", ""),
+            ComponentV2Row("Components", 3, "Atm", "Application", "/ComponentTypes", "", ""),
+            ComponentV2Row("Components", 4, "Composition_Test", "Composition", "/System", "", ""),
         ],
-        data_types=[
-            DataTypeRow("ADT_Bool", "IDT_Bool", "boolean", source_sheet="DataTypes", row_index=2),
+        primitive_data_types=[
+            PrimitiveDataTypeRow("PrimitiveDataTypes", 2, "App_Bool", "/DataTypes/App_Bool", "uint8", "/Platform/uint8", "boolean", "", "", "READ-ONLY"),
         ],
-        port_interfaces=[
-            PortInterfaceRow("ifBool", "SR", "BoolValue", "ADT_Bool", source_sheet="PortInterfaces", row_index=2),
+        sr_interfaces=[
+            SRInterfaceRow("SRInterfaces", 2, "If_Bool_SR", "/Interfaces/If_Bool_SR", "false"),
+        ],
+        sr_data_elements=[
+            SRDataElementRow("SRDataElements", 2, "If_Bool_SR", "ntfBool", "/DataTypes/App_Bool"),
+        ],
+        cs_interfaces=[
+            CSInterfaceRow("CSInterfaces", 2, "If_Cmd_CS", "/Interfaces/If_Cmd_CS", "false"),
+        ],
+        cs_operations=[
+            CSOperationRow("CSOperations", 2, "If_Cmd_CS", "rrCmd"),
+        ],
+        cs_arguments=[
+            CSArgumentRow("CSArguments", 2, "If_Cmd_CS", "rrCmd", "CmdVal", "IN", "/DataTypes/App_Bool"),
         ],
         ports=[
-            PortRow("Atm", "pBool", "P", "SR", "ifBool", "BoolValue", source_sheet="Ports", row_index=2),
-            PortRow("Enh", "rBool", "R", "SR", "ifBool", "BoolValue", source_sheet="Ports", row_index=3),
+            PortV2Row("Ports", 2, "Atm", "pBool", "P", "SR", "/Interfaces/If_Bool_SR", "ntfBool", "", "", "", "", "", "", ""),
+            PortV2Row("Ports", 3, "Enh", "rBool", "R", "SR", "/Interfaces/If_Bool_SR", "ntfBool", "", "", "", "", "", "", ""),
         ],
         runnables=[
-            RunnableRow("Enh", "Init", "Enh_Init", source_sheet="Runnables", row_index=2),
+            RunnableV2Row("Runnables", 2, "Enh", "Enh_Init", "Enh_Init"),
+        ],
+        component_prototypes=[
+            ComponentPrototypeRow("ComponentPrototypes", 2, "Composition_Test", "Atm_Inst", "Atm", "/ComponentTypes/Atm"),
+            ComponentPrototypeRow("ComponentPrototypes", 3, "Composition_Test", "Enh_Inst", "Enh", "/ComponentTypes/Enh"),
         ],
         composition_connectors=[
-            CompositionConnectorRow("total", "Atm", "pBool", "Enh", "rBool", source_sheet="CompositionConnectors", row_index=2),
+            CompositionConnectorV2Row("CompositionConnectors", 2, "Composition_Test", "Atm_Inst", "pBool", "Enh_Inst", "rBool", "Assembly"),
         ],
     )
 
@@ -47,7 +73,7 @@ def test_parser_defaults() -> None:
 
 def test_template_validations_are_present(tmp_path) -> None:
     path = tmp_path / "template.xlsx"
-    create_template(path)
+    create_template_v2(path)
     from openpyxl import load_workbook
 
     workbook = load_workbook(path)
@@ -56,20 +82,82 @@ def test_template_validations_are_present(tmp_path) -> None:
     assert workbook["RunnableEvents"].data_validations.count > 0
 
 
-def test_invalid_short_name_reports_excel_location() -> None:
+def test_empty_component_name_reported() -> None:
     model = _base_model()
-    model.data_types[0].adt_name = "ADT&Amp"
-    result = validate_model(model)
-    assert not result.ok
-    assert any("DataTypes!R2 ADTName" in error for error in result.errors)
+    model.components[0].component_name = ""
+    errors = validate_model_v2(model)
+    assert any("ComponentName" in error for error in errors)
 
 
-def test_connector_interface_mismatch_is_reported() -> None:
+def test_invalid_base_type_reported() -> None:
     model = _base_model()
-    model.port_interfaces.append(
-        PortInterfaceRow("ifOther", "SR", "OtherValue", "ADT_Bool", source_sheet="PortInterfaces", row_index=3)
-    )
-    model.ports[1].interface_name = "ifOther"
-    result = validate_model(model)
-    assert not result.ok
-    assert any("connector endpoints must use the same interface name" in error for error in result.errors)
+    model.primitive_data_types[0].base_type = "unknown_type"
+    errors = validate_model_v2(model)
+    assert any("BaseType" in error for error in errors)
+
+
+def test_unknown_component_kind_reported() -> None:
+    model = _base_model()
+    model.components[0].component_kind = "InvalidKind"
+    errors = validate_model_v2(model)
+    assert any("ComponentKind" in error for error in errors)
+
+
+def test_v2_template_loads_and_generates_arxml(tmp_path) -> None:
+    path = tmp_path / "hornctrl_v2.xlsx"
+    create_template_v2(path)
+    model = load_workbook_v2(path)
+    errors = validate_model_v2(model)
+    assert errors == []
+
+    tree = build_arxml_v2(model)
+    text = str(tree.getroot().xpath("count(//*[local-name()='SW-COMPONENT-PROTOTYPE'])"))
+    assert text == "4.0"
+
+
+def test_v2_connector_uses_prototype_context(tmp_path) -> None:
+    path = tmp_path / "hornctrl_v2.xlsx"
+    create_template_v2(path)
+    model = load_workbook_v2(path)
+    tree = build_arxml_v2(model)
+    xml_text = etree_to_text(tree)
+    assert "/HORN_CTRL/System/Composition_HornCtrl/Atm_Inst" in xml_text
+    assert "/HORN_CTRL/System/Composition_HornCtrl/Enh_Inst" in xml_text
+    assert "/HORN_CTRL/System/Composition_HornCtrl/Gen_Inst" in xml_text
+
+
+def test_v2_template_covers_record_and_linear_compu(tmp_path) -> None:
+    path = tmp_path / "hornctrl_v2.xlsx"
+    create_template_v2(path)
+    model = load_workbook_v2(path)
+    tree = build_arxml_v2(model)
+    xml_text = etree_to_text(tree)
+    assert "APPLICATION-RECORD-DATA-TYPE" in xml_text
+    assert "IMPLEMENTATION-DATA-TYPE" in xml_text
+    assert "CM_Volt_Linear" in xml_text
+    assert "COMPU-RATIONAL-COEFFS" in xml_text
+
+
+def test_v2_reports_unknown_data_type_ref(tmp_path) -> None:
+    path = tmp_path / "hornctrl_v2.xlsx"
+    create_template_v2(path)
+    model = load_workbook_v2(path)
+    model.sr_data_elements[0].application_type_ref = "/HORN_CTRL/ApplicationDataTypes/MissingType"
+    errors = validate_model_v2(model)
+    assert any("SRDataElements!R2 ApplicationTypeRef" in error for error in errors)
+
+
+def test_v2_includes_units(tmp_path) -> None:
+    path = tmp_path / "hornctrl_v2.xlsx"
+    create_template_v2(path)
+    model = load_workbook_v2(path)
+    tree = build_arxml_v2(model)
+    xml_text = etree_to_text(tree)
+    assert "UNIT" in xml_text
+    assert "FACTOR-SI-TO-UNIT" in xml_text
+
+
+def etree_to_text(tree) -> str:
+    from lxml import etree
+
+    return etree.tostring(tree, encoding="unicode")
