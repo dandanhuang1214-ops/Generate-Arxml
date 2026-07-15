@@ -73,6 +73,15 @@ class RecordElementRow(SourceRow):
 
 
 @dataclass(slots=True)
+class PortRecordInitValueRow(SourceRow):
+    component_name: str = ""
+    port_name: str = ""
+    record_element_path: str = ""
+    value: str = ""
+    value_type: str = ""
+
+
+@dataclass(slots=True)
 class DataTypeMappingRow(SourceRow):
     mapping_set_path: str = ""
     application_type_ref: str = ""
@@ -154,8 +163,10 @@ class PortV2Row(SourceRow):
     alive_timeout: str = ""
     queue_length: str = ""
     enable_update: str = ""
+    handle_never_received: str = ""
     handle_timeout_type: str = ""
     init_value: str = ""
+    init_value_type: str = ""
 
 
 @dataclass(slots=True)
@@ -205,6 +216,7 @@ class WorkbookV2Model:
     primitive_data_types: list[PrimitiveDataTypeRow] = field(default_factory=list)
     record_types: list[RecordTypeRow] = field(default_factory=list)
     record_elements: list[RecordElementRow] = field(default_factory=list)
+    port_record_init_values: list[PortRecordInitValueRow] = field(default_factory=list)
     data_type_mappings: list[DataTypeMappingRow] = field(default_factory=list)
     compu_methods: list[CompuMethodRow] = field(default_factory=list)
     compu_scales: list[CompuScaleRow] = field(default_factory=list)

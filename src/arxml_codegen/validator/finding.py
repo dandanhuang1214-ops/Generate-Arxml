@@ -1,6 +1,6 @@
 """Validation finding dataclass — models CORE-XXX findings like ARForge."""
 from __future__ import annotations
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from enum import Enum
 
 

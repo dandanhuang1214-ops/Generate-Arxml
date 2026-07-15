@@ -2,18 +2,22 @@
 from __future__ import annotations
 
 from arxml_codegen.models.schema import WorkbookV2Model as WorkbookModel
-from arxml_codegen.validator.finding import Finding, Severity
+from arxml_codegen.validator.finding import Finding
 from arxml_codegen.validator.rules import (
     check_access_port_consistency,
     check_com_spec_semantics,
     check_compu_method_values,
+    check_compu_scale_ranges,
     check_connector_consistency,
     check_cs_connectivity,
     check_cs_operation_arguments,
     check_cs_usage,
+    check_dataconstr_coverage,
     check_datatype_completeness,
+    check_datatype_mapping_completeness,
     check_declared_port_usage,
     check_duplicate_names,
+    check_init_value_types,
     check_port_interface_references,
     check_runnable_event_association,
     check_runnable_trigger_policy,
@@ -25,6 +29,7 @@ from arxml_codegen.validator.rules import (
     check_swc_completeness,
     check_timing_constraints,
     check_trigger_port_consistency,
+    check_unit_references,
     check_unconnected_ports,
 )
 
@@ -34,6 +39,11 @@ RULES = [
     ("CORE-050", "Duplicate Detection", check_duplicate_names),
     ("CORE-010", "DataType Completeness", check_datatype_completeness),
     ("CORE-010", "CompuMethod Values", check_compu_method_values),
+    ("CORE-010", "CompuScale Ranges", check_compu_scale_ranges),
+    ("CORE-010", "DataConstr Coverage", check_dataconstr_coverage),
+    ("CORE-010", "Unit References", check_unit_references),
+    ("CORE-010", "DataTypeMapping Completeness", check_datatype_mapping_completeness),
+    ("CORE-010", "InitValue Types", check_init_value_types),
     ("CORE-010", "Port-Interface References", check_port_interface_references),
     ("CORE-010", "CS Operation Arguments", check_cs_operation_arguments),
     ("CORE-020", "SWC Completeness", check_swc_completeness),

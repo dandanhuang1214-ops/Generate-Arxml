@@ -21,7 +21,7 @@ from docx import Document
 from docx.enum.table import WD_TABLE_ALIGNMENT
 from docx.enum.text import WD_ALIGN_PARAGRAPH
 from docx.oxml.ns import qn
-from docx.shared import Cm, Inches, Pt, RGBColor
+from docx.shared import Cm, Pt, RGBColor
 from openpyxl import Workbook
 from openpyxl.styles import Font as XlFont, PatternFill
 from openpyxl.worksheet.datavalidation import DataValidation
@@ -54,9 +54,7 @@ def create_docx_template(output: Path) -> None:
         "本文档是 ARXML 代码生成工具的标准输入格式。"
         "各节表格与 Excel 模板 Sheet 一一对应，填写完成后可通过 docx_to_excel.py 转换为 Excel 工作簿。"
     )
-    doc.add_paragraph(
-        f"项目：Horn Control（喇叭控制） | AUTOSAR 版本：4.3.0 | 根包：/HORN_CTRL"
-    )
+    doc.add_paragraph("项目：Horn Control（喇叭控制） | AUTOSAR 版本：4.3.0 | 根包：/HORN_CTRL")
 
     # ── Table of Contents placeholder ──
     doc.add_heading("目录", level=1)
@@ -218,7 +216,6 @@ def docx_to_excel(docx_path: Path, excel_path: Path) -> None:
     processed_sheets: set[str] = set()
 
     # Iterate through block-level elements in document order
-    from docx.oxml.ns import qn as _qn
     body = doc.element.body
     nsmap_w = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
 

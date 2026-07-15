@@ -16,6 +16,7 @@ from arxml_codegen.models.schema import (
     DataConstrRow,
     DataTypeMappingRow,
     PrimitiveDataTypeRow,
+    PortRecordInitValueRow,
     ProjectConfigRow,
     RecordElementRow,
     RecordTypeRow,
@@ -106,6 +107,19 @@ def load_workbook_v2(path: Path) -> WorkbookV2Model:
             RecordElementRow(sheet, row_index, _cell(row, header, "RecordTypeName"), _cell(row, header, "ElementName"), _cell(row, header, "ApplicationElementTypeRef"), _cell(row, header, "ImplementationElementTypeRef"), _cell(row, header, "Order"))
         )
 
+    for sheet, row_index, header, row in _rows(workbook, "PortRecordInitValues") or []:
+        model.port_record_init_values.append(
+            PortRecordInitValueRow(
+                sheet,
+                row_index,
+                _cell(row, header, "ComponentName"),
+                _cell(row, header, "PortName"),
+                _cell(row, header, "RecordElementPath"),
+                _cell(row, header, "Value"),
+                _cell(row, header, "ValueType"),
+            )
+        )
+
     for sheet, row_index, header, row in _rows(workbook, "DataTypeMappings") or []:
         model.data_type_mappings.append(
             DataTypeMappingRow(sheet, row_index, _cell(row, header, "MappingSetPath"), _cell(row, header, "ApplicationTypeRef"), _cell(row, header, "ImplementationTypeRef"))
@@ -137,7 +151,25 @@ def load_workbook_v2(path: Path) -> WorkbookV2Model:
 
     for sheet, row_index, header, row in _rows(workbook, "Ports") or []:
         model.ports.append(
-            PortV2Row(sheet, row_index, _cell(row, header, "ComponentName"), _cell(row, header, "PortName"), _cell(row, header, "PortDirection"), _cell(row, header, "InterfaceKind"), _cell(row, header, "InterfaceRef"), _cell(row, header, "DataElementName"), _cell(row, header, "OperationName"), _cell(row, header, "ComSpecKind"), _cell(row, header, "AliveTimeout"), _cell(row, header, "QueueLength"), _cell(row, header, "EnableUpdate"), _cell(row, header, "HandleTimeoutType"), _cell(row, header, "InitValue"))
+            PortV2Row(
+                sheet,
+                row_index,
+                _cell(row, header, "ComponentName"),
+                _cell(row, header, "PortName"),
+                _cell(row, header, "PortDirection"),
+                _cell(row, header, "InterfaceKind"),
+                _cell(row, header, "InterfaceRef"),
+                _cell(row, header, "DataElementName"),
+                _cell(row, header, "OperationName"),
+                _cell(row, header, "ComSpecKind"),
+                _cell(row, header, "AliveTimeout"),
+                _cell(row, header, "QueueLength"),
+                _cell(row, header, "EnableUpdate"),
+                _cell(row, header, "HandleNeverReceived"),
+                _cell(row, header, "HandleTimeoutType"),
+                _cell(row, header, "InitValue"),
+                _cell(row, header, "InitValueType"),
+            )
         )
 
     for sheet, row_index, header, row in _rows(workbook, "Runnables") or []:

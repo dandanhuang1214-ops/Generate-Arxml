@@ -146,7 +146,7 @@ def check_compu_method_values(model: WorkbookModel) -> list[Finding]:
                         float(s.denominator)
                     except ValueError:
                         findings.append(Finding("CORE-010-COMPU-SCALE-INVALID", Severity.ERROR,
-                                                f"CompuScale for '{row.compu_method_name}' has non-numeric numerator/denominator.", loc))
+                                            f"CompuScale for '{row.compu_method_name}' has non-numeric numerator/denominator.", loc))
 
     # Check scale duplicates per compu method
     for cm_name, scales in cm_scales.items():
@@ -156,9 +156,355 @@ def check_compu_method_values(model: WorkbookModel) -> list[Finding]:
             if key in seen_vals and key != ("", "", ""):
                 loc = f"{s.source_sheet}!R{s.row_index}"
                 findings.append(Finding("CORE-010-COMPU-SCALE-DUPLICATE", Severity.ERROR,
-                                        f"CompuScale duplicate for '{cm_name}' at {key}.", loc))
+                                            f"CompuScale duplicate for '{cm_name}' at {key}.", loc))
             seen_vals.add(key)
     return findings
+
+
+def check_compu_scale_ranges(model: WorkbookModel) -> list[Finding]:
+    """CORE-010-COMPU-SCALE-GAP: Detect numeric CompuScale gaps and overlaps."""
+    findings = []
+    cm_scales = defaultdict(list)
+    for scale in model.compu_scales:
+        lower = _to_float(scale.lower_limit)
+        upper = _to_float(scale.upper_limit)
+        if lower is None or upper is None:
+            continue
+        cm_scales[scale.compu_method_name].append((lower, upper, scale))
+
+    for cm_name, intervals in cm_scales.items():
+        if len(intervals) < 2:
+            continue
+        intervals.sort(key=lambda item: (item[0], item[1]))
+        previous_lower, previous_upper, previous_scale = intervals[0]
+        if previous_lower > previous_upper:
+            loc = f"{previous_scale.source_sheet}!R{previous_scale.row_index}"
+            findings.append(Finding(
+                "CORE-010-COMPU-SCALE-INVALID-RANGE",
+                Severity.ERROR,
+                f"CompuScale for '{cm_name}' has LowerLimit > UpperLimit.",
+                loc,
+            ))
+        for lower, upper, scale in intervals[1:]:
+            loc = f"{scale.source_sheet}!R{scale.row_index}"
+            if lower > upper:
+                findings.append(Finding(
+                    "CORE-010-COMPU-SCALE-INVALID-RANGE",
+                    Severity.ERROR,
+                    f"CompuScale for '{cm_name}' has LowerLimit > UpperLimit.",
+                    loc,
+                ))
+                continue
+            if lower <= previous_upper:
+                findings.append(Finding(
+                    "CORE-010-COMPU-SCALE-OVERLAP",
+                    Severity.ERROR,
+                    f"CompuMethod '{cm_name}' has overlapping CompuScale ranges: "
+                    f"{previous_lower:g}..{previous_upper:g} overlaps {lower:g}..{upper:g}.",
+                    loc,
+                    suggestion="Make CompuScale intervals disjoint.",
+                ))
+            elif lower > previous_upper + 1:
+                findings.append(Finding(
+                    "CORE-010-COMPU-SCALE-GAP",
+                    Severity.WARNING,
+                    f"CompuMethod '{cm_name}' has a gap between {previous_upper:g} and {lower:g}.",
+                    loc,
+                    suggestion="Cover the full internal value range used by the related DataConstr.",
+                ))
+            if upper > previous_upper:
+                previous_lower, previous_upper, previous_scale = lower, upper, scale
+    return findings
+
+
+def check_dataconstr_coverage(model: WorkbookModel) -> list[Finding]:
+    """CORE-010-DATACONSTR-COVERAGE: ADT DataConstr should be covered by CompuScale ranges."""
+    findings = []
+    compu_by_path = {row.compu_method_path: row for row in model.compu_methods if row.compu_method_path}
+    constr_by_path = {row.data_constr_path: row for row in model.data_constrs if row.data_constr_path}
+    scales_by_method = defaultdict(list)
+    for scale in model.compu_scales:
+        lower = _to_float(scale.lower_limit)
+        upper = _to_float(scale.upper_limit)
+        if lower is not None and upper is not None:
+            scales_by_method[scale.compu_method_name].append((lower, upper))
+
+    for data_type in model.primitive_data_types:
+        if not data_type.compu_method_ref or not data_type.data_constr_ref:
+            continue
+        compu = compu_by_path.get(data_type.compu_method_ref)
+        constr = constr_by_path.get(data_type.data_constr_ref)
+        if not compu or not constr:
+            continue
+        category = (compu.category or "").strip().upper()
+        if category not in {"TEXTTABLE", "IDENTICAL"}:
+            continue
+        lower = _to_float(constr.lower_limit)
+        upper = _to_float(constr.upper_limit)
+        if lower is None or upper is None:
+            continue
+        intervals = _merge_intervals(scales_by_method.get(compu.compu_method_name, []))
+        if not intervals:
+            continue
+        missing = _range_missing_segments(lower, upper, intervals)
+        if missing:
+            loc = f"{data_type.source_sheet}!R{data_type.row_index}"
+            missing_text = ", ".join(f"{lo:g}..{hi:g}" for lo, hi in missing[:4])
+            severity = Severity.WARNING if category == "TEXTTABLE" else Severity.ERROR
+            findings.append(Finding(
+                "CORE-010-DATACONSTR-COVERAGE",
+                severity,
+                f"ADT '{data_type.application_type_name}' DataConstr range {lower:g}..{upper:g} "
+                f"is not fully covered by CompuMethod '{compu.compu_method_name}' scales. "
+                f"Missing: {missing_text}.",
+                loc,
+                suggestion="For sparse TEXTTABLE enums this can be acceptable; otherwise add CompuScale intervals or narrow the DataConstr range.",
+            ))
+    return findings
+
+
+def check_unit_references(model: WorkbookModel) -> list[Finding]:
+    """CORE-010-UNIT-UNKNOWN: UnitRef must point to a declared Units row."""
+    findings = []
+    unit_paths = {unit.unit_path for unit in model.units if unit.unit_path}
+    for data_type in model.primitive_data_types:
+        if not data_type.unit_ref:
+            continue
+        if data_type.unit_ref not in unit_paths:
+            loc = f"{data_type.source_sheet}!R{data_type.row_index}"
+            findings.append(Finding(
+                "CORE-010-UNIT-UNKNOWN",
+                Severity.ERROR,
+                f"ADT '{data_type.application_type_name}' references unknown UnitRef '{data_type.unit_ref}'.",
+                loc,
+                suggestion="Add the unit to the Units sheet or clear UnitRef.",
+            ))
+    return findings
+
+
+def check_datatype_mapping_completeness(model: WorkbookModel) -> list[Finding]:
+    """CORE-010-MAPPING-MISSING: Every actually used ADT should have DataTypeMapping."""
+    findings = []
+    mapped_refs = {row.application_type_ref for row in model.data_type_mappings if row.application_type_ref}
+    used_refs: dict[str, tuple[str, int, str]] = {}
+    for row in model.sr_data_elements:
+        if row.application_type_ref:
+            used_refs.setdefault(
+                row.application_type_ref,
+                (row.source_sheet, row.row_index, f"SR data element '{row.interface_name}.{row.data_element_name}'"),
+            )
+    for row in model.cs_arguments:
+        if row.application_type_ref:
+            used_refs.setdefault(
+                row.application_type_ref,
+                (row.source_sheet, row.row_index, f"CS argument '{row.interface_name}.{row.operation_name}.{row.argument_name}'"),
+            )
+    for row in model.record_elements:
+        if row.application_element_type_ref:
+            used_refs.setdefault(
+                row.application_element_type_ref,
+                (row.source_sheet, row.row_index, f"Record element '{row.record_type_name}.{row.element_name}'"),
+            )
+
+    for app_ref, (sheet, row_index, usage) in sorted(used_refs.items()):
+        if app_ref not in mapped_refs:
+            findings.append(Finding(
+                "CORE-010-MAPPING-MISSING",
+                Severity.ERROR,
+                f"{usage} uses ADT '{app_ref}' but no DataTypeMappings row maps it.",
+                f"{sheet}!R{row_index}" if sheet else "",
+                suggestion="Add a DataTypeMappings row for this ApplicationTypeRef.",
+            ))
+    return findings
+
+
+def check_init_value_types(model: WorkbookModel) -> list[Finding]:
+    """CORE-010-INIT-VALUE-TYPE-MISMATCH: InitValue must match InitValueType and ADT."""
+    findings = []
+    sr_iface_by_path = {row.interface_path: row for row in model.sr_interfaces}
+    sr_element_by_iface = {
+        (row.interface_name, row.data_element_name): row
+        for row in model.sr_data_elements
+    }
+    adt_by_path = {row.application_type_path: row for row in model.primitive_data_types}
+    compu_paths = {row.compu_method_path for row in model.compu_methods if row.compu_method_path}
+    constr_by_path = {row.data_constr_path: row for row in model.data_constrs if row.data_constr_path}
+    scales_by_method = defaultdict(list)
+    for scale in model.compu_scales:
+        scales_by_method[scale.compu_method_name].append(scale)
+
+    for port in model.ports:
+        if (port.interface_kind or "").upper() != "SR":
+            continue
+        loc = f"{port.source_sheet}!R{port.row_index}" if port.source_sheet else ""
+        kind = (port.init_value_type or "Value").strip().lower()
+        if kind not in {"value", "numeric", "enum", "boolean", "string", "record"}:
+            findings.append(Finding(
+                "CORE-010-INIT-VALUE-TYPE-UNKNOWN",
+                Severity.ERROR,
+                f"Port '{port.component_name}/{port.port_name}' has unknown InitValueType '{port.init_value_type}'.",
+                loc,
+                suggestion="Use Value, Numeric, Enum, Boolean, String, or Record.",
+            ))
+            continue
+
+        iface = sr_iface_by_path.get(port.interface_ref)
+        data_element = sr_element_by_iface.get((iface.interface_name, port.data_element_name)) if iface else None
+        adt = adt_by_path.get(data_element.application_type_ref) if data_element else None
+
+        if kind in {"value", "numeric"}:
+            if not port.init_value:
+                continue
+            numeric_value = _to_float(port.init_value)
+            if numeric_value is None:
+                findings.append(Finding(
+                    "CORE-010-INIT-VALUE-TYPE-MISMATCH",
+                    Severity.ERROR,
+                    f"Value InitValue '{port.init_value}' is not a number.",
+                    loc,
+                ))
+                continue
+            if adt and adt.data_constr_ref:
+                constr = constr_by_path.get(adt.data_constr_ref)
+                lower = _to_float(constr.lower_limit) if constr else None
+                upper = _to_float(constr.upper_limit) if constr else None
+                below = lower is not None and numeric_value < lower
+                above = upper is not None and numeric_value > upper
+                if below or above:
+                    lower_text = f"{lower:g}" if lower is not None else "-inf"
+                    upper_text = f"{upper:g}" if upper is not None else "+inf"
+                    findings.append(Finding(
+                        "CORE-010-INIT-VALUE-RANGE",
+                        Severity.ERROR,
+                        f"Value InitValue {numeric_value:g} is outside DataConstr range {lower_text}..{upper_text}.",
+                        loc,
+                    ))
+        elif kind == "boolean":
+            if not port.init_value:
+                continue
+            if (port.init_value or "").strip().lower() not in {"true", "false", "0", "1"}:
+                findings.append(Finding(
+                    "CORE-010-INIT-VALUE-TYPE-MISMATCH",
+                    Severity.ERROR,
+                    f"Boolean InitValue '{port.init_value}' must be true/false or 0/1.",
+                    loc,
+                ))
+        elif kind == "enum":
+            if not port.init_value:
+                continue
+            if not adt or not adt.compu_method_ref:
+                continue
+            if adt.compu_method_ref not in compu_paths:
+                continue
+            allowed = {
+                scale.text_value
+                for scale in scales_by_method.get(_short_ref(adt.compu_method_ref), [])
+                if scale.text_value
+            }
+            if allowed and port.init_value not in allowed:
+                findings.append(Finding(
+                    "CORE-010-INIT-VALUE-TYPE-MISMATCH",
+                    Severity.ERROR,
+                    f"Enum InitValue '{port.init_value}' is not one of {sorted(allowed)}.",
+                    loc,
+                    suggestion="For Enum InitValue, fill the CompuScale symbol name, not the numeric value.",
+                ))
+        elif kind == "record":
+            rows = [
+                row
+                for row in model.port_record_init_values
+                if row.component_name == port.component_name and row.port_name == port.port_name
+            ]
+            if not rows:
+                findings.append(Finding(
+                    "CORE-010-INIT-VALUE-RECORD-MISSING",
+                    Severity.ERROR,
+                    f"Record InitValue for port '{port.component_name}/{port.port_name}' has no PortRecordInitValues rows.",
+                    loc,
+                    suggestion="Add one PortRecordInitValues row for every RecordElement.",
+                ))
+                continue
+            record_type = _record_type_for_port(port, model)
+            expected = {
+                row.element_name
+                for row in model.record_elements
+                if row.record_type_name == record_type
+            }
+            actual = {row.record_element_path.split(".")[0] for row in rows if row.record_element_path}
+            missing = sorted(expected - actual)
+            if missing:
+                findings.append(Finding(
+                    "CORE-010-INIT-VALUE-RECORD-INCOMPLETE",
+                    Severity.ERROR,
+                    f"Record InitValue for port '{port.component_name}/{port.port_name}' is missing fields {missing}.",
+                    loc,
+                    suggestion="Add missing PortRecordInitValues rows.",
+                ))
+    return findings
+
+
+def _to_float(value: str) -> float | None:
+    text = (value or "").strip()
+    if not text:
+        return None
+    try:
+        return float(text)
+    except ValueError:
+        return None
+
+
+def _short_ref(ref: str) -> str:
+    return (ref or "").strip("/").split("/")[-1]
+
+
+def _record_type_for_port(port, model: WorkbookModel) -> str:
+    sr_iface_by_path = {row.interface_path: row for row in model.sr_interfaces}
+    sr_element_by_iface = {
+        (row.interface_name, row.data_element_name): row
+        for row in model.sr_data_elements
+    }
+    record_by_path = {row.application_type_path: row.application_type_name for row in model.record_types}
+    iface = sr_iface_by_path.get(port.interface_ref)
+    if iface is None:
+        return ""
+    data_element = sr_element_by_iface.get((iface.interface_name, port.data_element_name))
+    if data_element is None:
+        return ""
+    return record_by_path.get(data_element.application_type_ref, "")
+
+
+def _merge_intervals(intervals: list[tuple[float, float]]) -> list[tuple[float, float]]:
+    if not intervals:
+        return []
+    ordered = sorted((min(lo, hi), max(lo, hi)) for lo, hi in intervals)
+    merged = [ordered[0]]
+    for lower, upper in ordered[1:]:
+        previous_lower, previous_upper = merged[-1]
+        if lower <= previous_upper + 1:
+            merged[-1] = (previous_lower, max(previous_upper, upper))
+        else:
+            merged.append((lower, upper))
+    return merged
+
+
+def _range_missing_segments(
+    lower: float,
+    upper: float,
+    intervals: list[tuple[float, float]],
+) -> list[tuple[float, float]]:
+    cursor = lower
+    missing = []
+    for interval_lower, interval_upper in intervals:
+        if interval_upper < cursor:
+            continue
+        if interval_lower > cursor:
+            missing.append((cursor, min(interval_lower - 1, upper)))
+        cursor = max(cursor, interval_upper + 1)
+        if cursor > upper:
+            break
+    if cursor <= upper:
+        missing.append((cursor, upper))
+    return [(lo, hi) for lo, hi in missing if lo <= hi]
 
 
 def check_port_interface_references(model: WorkbookModel) -> list[Finding]:
@@ -475,7 +821,7 @@ def check_com_spec_semantics(model: WorkbookModel) -> list[Finding]:
                                         f"SR port '{row.port_name}' has CS ComSpec '{com_spec}'.", loc,
                                         suggestion="Use NONQUEUED-SENDER-COM-SPEC or NONQUEUED-RECEIVER-COM-SPEC for SR ports."))
             # Validate queue_length for queued modes
-            if "QUEUED" in com_spec.upper():
+            if com_spec.upper() in {"QUEUED-SENDER-COM-SPEC", "QUEUED-RECEIVER-COM-SPEC"}:
                 try:
                     qlen = int(row.queue_length) if row.queue_length else 0
                 except ValueError:

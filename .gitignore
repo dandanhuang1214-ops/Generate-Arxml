@@ -1,9 +1,8 @@
 .venv/
+.claude/
 __pycache__/
 .pytest_cache/
 .ruff_cache/
 *.pyc
-output/*.arxml
-output/*.xml
-output/*.log
+output/**
 data/input/~$*.xlsx

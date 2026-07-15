@@ -14,6 +14,7 @@ SHEETS: dict[str, list[str]] = {
     "PrimitiveDataTypes": ["ApplicationTypeName", "ApplicationTypePath", "ImplementationTypeName", "ImplementationTypePath", "BaseType", "CompuMethodRef", "DataConstrRef", "CalibrationAccess", "UnitRef", "Description"],
     "RecordTypes": ["ApplicationTypeName", "ApplicationTypePath", "ImplementationTypeName", "ImplementationTypePath", "CalibrationAccess", "Description"],
     "RecordElements": ["RecordTypeName", "ElementName", "ApplicationElementTypeRef", "ImplementationElementTypeRef", "Order", "Description"],
+    "PortRecordInitValues": ["ComponentName", "PortName", "RecordElementPath", "Value", "ValueType", "Description"],
     "DataTypeMappings": ["MappingSetPath", "ApplicationTypeRef", "ImplementationTypeRef", "Description"],
     "CompuMethods": ["CompuMethodName", "CompuMethodPath", "Category", "Description"],
     "CompuScales": ["CompuMethodName", "LowerLimit", "UpperLimit", "TextValue", "Numerator", "Denominator", "Offset", "Description"],
@@ -23,7 +24,7 @@ SHEETS: dict[str, list[str]] = {
     "CSInterfaces": ["InterfaceName", "InterfacePath", "IsService", "Description"],
     "CSOperations": ["InterfaceName", "OperationName", "Description"],
     "CSArguments": ["InterfaceName", "OperationName", "ArgumentName", "Direction", "ApplicationTypeRef", "Description"],
-    "Ports": ["ComponentName", "PortName", "PortDirection", "InterfaceKind", "InterfaceRef", "DataElementName", "OperationName", "ComSpecKind", "AliveTimeout", "QueueLength", "EnableUpdate", "HandleTimeoutType", "InitValue", "Description"],
+    "Ports": ["ComponentName", "PortName", "PortDirection", "InterfaceKind", "InterfaceRef", "DataElementName", "OperationName", "ComSpecKind", "AliveTimeout", "QueueLength", "EnableUpdate", "HandleNeverReceived", "HandleTimeoutType", "InitValue", "InitValueType", "Description"],
     "Runnables": ["ComponentName", "RunnableName", "Symbol", "Description"],
     "RunnableEvents": ["ComponentName", "RunnableName", "TriggerType", "PeriodMs", "PortName", "OperationName", "DataElementName", "Description"],
     "RunnableAccesses": ["ComponentName", "RunnableName", "AccessType", "PortName", "OperationName", "DataElementName", "AccessName", "Description"],
@@ -37,6 +38,11 @@ EXAMPLE_ROWS: dict[str, list[list[str]]] = {
         ["AutosarVersion", "4-3-0", "AUTOSAR schema version"],
         ["RootPackage", "/HORN_CTRL", "Root package for the project"],
         ["DefaultMappingSetPath", "/ComponentTypes/MappingSets/APP_data_mapping", "Default data type mapping set path"],
+        ["InterfacePackage", "/PortInterfaces", "DaVinci reusable package for SR/CS port interfaces"],
+        ["DataTypePackage", "/DataTypes", "DaVinci reusable package for application and project implementation data types"],
+        ["CompuMethodPackage", "/DataTypes/CompuMethods", "DaVinci reusable package for CompuMethods"],
+        ["DataConstrPackage", "/DataTypes/DataConstrs", "DaVinci reusable package for DataConstrs"],
+        ["UnitPackage", "/DataTypes/Units", "DaVinci reusable package for Units"],
     ],
     "Components": [
         ["Composition_HornCtrl", "Composition", "/HORN_CTRL/System", "", "", "Top-level composition SWC"],
@@ -64,6 +70,10 @@ EXAMPLE_ROWS: dict[str, list[list[str]]] = {
         ["App_OnDuration", "/HORN_CTRL/ApplicationDataTypes/App_OnDuration", "uint32", "/AUTOSAR_Platform/ImplementationDataTypes/uint32", "uint32", "", "", "READ-ONLY", "", "ON duration in ms"],
         ["App_OffDuration", "/HORN_CTRL/ApplicationDataTypes/App_OffDuration", "uint32", "/AUTOSAR_Platform/ImplementationDataTypes/uint32", "uint32", "", "", "READ-ONLY", "", "OFF duration in ms"],
         ["App_HornTimes", "/HORN_CTRL/ApplicationDataTypes/App_HornTimes", "uint8", "/AUTOSAR_Platform/ImplementationDataTypes/uint8", "uint8", "/HORN_CTRL/CompuMethods/CM_HornTimes", "", "READ-ONLY", "", "Horn repeat times"],
+        ["App_CallID", "/HORN_CTRL/ApplicationDataTypes/App_CallID", "uint64", "/AUTOSAR_Platform/ImplementationDataTypes/uint64", "uint64", "", "", "READ-ONLY", "", "Service call ID"],
+        ["App_TimeStamp", "/HORN_CTRL/ApplicationDataTypes/App_TimeStamp", "uint64", "/AUTOSAR_Platform/ImplementationDataTypes/uint64", "uint64", "", "", "READ-ONLY", "", "Service timestamp"],
+        ["App_Prio", "/HORN_CTRL/ApplicationDataTypes/App_Prio", "uint8", "/AUTOSAR_Platform/ImplementationDataTypes/uint8", "uint8", "", "", "READ-ONLY", "", "Service priority"],
+        ["App_OperSts", "/HORN_CTRL/ApplicationDataTypes/App_OperSts", "uint8", "/AUTOSAR_Platform/ImplementationDataTypes/uint8", "uint8", "", "", "READ-ONLY", "", "Service operation status"],
         ["APP_Boolean", "/DataTypes/APP_Boolean", "boolean", "/AUTOSAR_Platform/ImplementationDataTypes/boolean", "boolean", "/AUTOSAR_Platform/CompuMethods/boolean_CompuMethod", "/AUTOSAR_Platform/DataConstrs/boolean_DataConstr", "READ-ONLY", "", "Platform boolean ADT"],
     ],
     "RecordTypes": [
@@ -78,6 +88,24 @@ EXAMPLE_ROWS: dict[str, list[list[str]]] = {
         ["App_HornPeriodMode", "OnDuration", "/HORN_CTRL/ApplicationDataTypes/App_OnDuration", "/AUTOSAR_Platform/ImplementationDataTypes/uint32", "1", ""],
         ["App_HornPeriodMode", "OffDuration", "/HORN_CTRL/ApplicationDataTypes/App_OffDuration", "/AUTOSAR_Platform/ImplementationDataTypes/uint32", "2", ""],
         ["App_HornPeriodMode", "HornTimes", "/HORN_CTRL/ApplicationDataTypes/App_HornTimes", "/AUTOSAR_Platform/ImplementationDataTypes/uint8", "3", ""],
+        ["App_SrvOperSts", "CallID", "/HORN_CTRL/ApplicationDataTypes/App_CallID", "/AUTOSAR_Platform/ImplementationDataTypes/uint64", "1", ""],
+        ["App_SrvOperSts", "TimeStamp", "/HORN_CTRL/ApplicationDataTypes/App_TimeStamp", "/AUTOSAR_Platform/ImplementationDataTypes/uint64", "2", ""],
+        ["App_SrvOperSts", "Prio", "/HORN_CTRL/ApplicationDataTypes/App_Prio", "/AUTOSAR_Platform/ImplementationDataTypes/uint8", "3", ""],
+        ["App_SrvOperSts", "OperSts", "/HORN_CTRL/ApplicationDataTypes/App_OperSts", "/AUTOSAR_Platform/ImplementationDataTypes/uint8", "4", ""],
+    ],
+    "PortRecordInitValues": [
+        ["BOD_HornCtrl_Enh", "Pp_SrvOperSts_SR", "CallID", "0", "Numeric", ""],
+        ["BOD_HornCtrl_Enh", "Pp_SrvOperSts_SR", "TimeStamp", "0", "Numeric", ""],
+        ["BOD_HornCtrl_Enh", "Pp_SrvOperSts_SR", "Prio", "0", "Numeric", ""],
+        ["BOD_HornCtrl_Enh", "Pp_SrvOperSts_SR", "OperSts", "0", "Numeric", ""],
+        ["BOD_ChildLeftBehindAlert_Scen", "Pp_Scen_SrvOperSts_SR", "CallID", "0", "Numeric", ""],
+        ["BOD_ChildLeftBehindAlert_Scen", "Pp_Scen_SrvOperSts_SR", "TimeStamp", "0", "Numeric", ""],
+        ["BOD_ChildLeftBehindAlert_Scen", "Pp_Scen_SrvOperSts_SR", "Prio", "0", "Numeric", ""],
+        ["BOD_ChildLeftBehindAlert_Scen", "Pp_Scen_SrvOperSts_SR", "OperSts", "0", "Numeric", ""],
+        ["BOD_ChildLeftBehindAlert_Scen", "Rp_SrvOperSts_SR", "CallID", "0", "Numeric", ""],
+        ["BOD_ChildLeftBehindAlert_Scen", "Rp_SrvOperSts_SR", "TimeStamp", "0", "Numeric", ""],
+        ["BOD_ChildLeftBehindAlert_Scen", "Rp_SrvOperSts_SR", "Prio", "0", "Numeric", ""],
+        ["BOD_ChildLeftBehindAlert_Scen", "Rp_SrvOperSts_SR", "OperSts", "0", "Numeric", ""],
     ],
     "DataTypeMappings": [
         ["/ComponentTypes/MappingSets/APP_data_mapping", "/HORN_CTRL/ApplicationDataTypes/App_HornCmd", "/AUTOSAR_Platform/ImplementationDataTypes/uint8", ""],
@@ -92,12 +120,16 @@ EXAMPLE_ROWS: dict[str, list[list[str]]] = {
         ["/ComponentTypes/MappingSets/APP_data_mapping", "/HORN_CTRL/ApplicationDataTypes/App_OnDuration", "/AUTOSAR_Platform/ImplementationDataTypes/uint32", ""],
         ["/ComponentTypes/MappingSets/APP_data_mapping", "/HORN_CTRL/ApplicationDataTypes/App_OffDuration", "/AUTOSAR_Platform/ImplementationDataTypes/uint32", ""],
         ["/ComponentTypes/MappingSets/APP_data_mapping", "/HORN_CTRL/ApplicationDataTypes/App_HornTimes", "/AUTOSAR_Platform/ImplementationDataTypes/uint8", ""],
+        ["/ComponentTypes/MappingSets/APP_data_mapping", "/HORN_CTRL/ApplicationDataTypes/App_CallID", "/AUTOSAR_Platform/ImplementationDataTypes/uint64", ""],
+        ["/ComponentTypes/MappingSets/APP_data_mapping", "/HORN_CTRL/ApplicationDataTypes/App_TimeStamp", "/AUTOSAR_Platform/ImplementationDataTypes/uint64", ""],
+        ["/ComponentTypes/MappingSets/APP_data_mapping", "/HORN_CTRL/ApplicationDataTypes/App_Prio", "/AUTOSAR_Platform/ImplementationDataTypes/uint8", ""],
+        ["/ComponentTypes/MappingSets/APP_data_mapping", "/HORN_CTRL/ApplicationDataTypes/App_OperSts", "/AUTOSAR_Platform/ImplementationDataTypes/uint8", ""],
         ["/ComponentTypes/MappingSets/APP_data_mapping", "/HORN_CTRL/ApplicationDataTypes/App_HornCtrlMode", "/HORN_CTRL/ImplementationDataTypes/Impl_HornCtrlMode", ""],
         ["/ComponentTypes/MappingSets/APP_data_mapping", "/HORN_CTRL/ApplicationDataTypes/App_HornPeriodMode", "/HORN_CTRL/ImplementationDataTypes/Impl_HornPeriod", ""],
         ["/ComponentTypes/MappingSets/APP_data_mapping", "/HORN_CTRL/ApplicationDataTypes/App_SrvOperSts", "/HORN_CTRL/ImplementationDataTypes/Impl_SrvOperSts_Struct", ""],
     ],
     "CompuMethods": [
-        ["boolean_CompuMethod", "/AUTOSAR_Platform/CompuMethods/boolean_CompuMethod", "IDENTICAL", "Platform boolean computation method"],
+        ["boolean_CompuMethod", "/AUTOSAR_Platform/CompuMethods/boolean_CompuMethod", "TEXTTABLE", "Platform boolean computation method"],
         ["CM_HornCmd_TextTable", "/HORN_CTRL/CompuMethods/CM_HornCmd_TextTable", "TEXTTABLE", "Horn command: OFF=0, ON=1"],
         ["CM_Volt_Linear", "/HORN_CTRL/CompuMethods/CM_Volt_Linear", "LINEAR", "PhysicalValue = Internal * 0.1V"],
         ["CM_Curr_Linear", "/HORN_CTRL/CompuMethods/CM_Curr_Linear", "LINEAR", "PhysicalValue = Internal * 0.01A"],
@@ -106,21 +138,25 @@ EXAMPLE_ROWS: dict[str, list[list[str]]] = {
         ["CM_HornOperCmd_TextTable", "/HORN_CTRL/CompuMethods/CM_HornOperCmd_TextTable", "TEXTTABLE", "Horn operation command text table"],
     ],
     "CompuScales": [
-        ["CM_HornCmd_TextTable", "0", "0", "OFF", "", "", "", ""],
-        ["CM_HornCmd_TextTable", "1", "1", "ON", "", "", "", ""],
+        ["boolean_CompuMethod", "0", "0", "FALSE", "", "", "", ""],
+        ["boolean_CompuMethod", "1", "1", "TRUE", "", "", "", ""],
+        ["CM_HornCmd_TextTable", "0", "0", "STOP", "", "", "", ""],
+        ["CM_HornCmd_TextTable", "1", "1", "START", "", "", "", ""],
+        ["CM_HornCmd_TextTable", "2", "2", "ALERT", "", "", "", ""],
+        ["CM_HornCmd_TextTable", "255", "255", "INVALID", "", "", "", ""],
         ["CM_Volt_Linear", "", "", "", "1", "10", "0", ""],
         ["CM_Curr_Linear", "", "", "", "1", "100", "0", ""],
         ["CM_DutyRat_Linear", "", "", "", "1", "10", "0", ""],
-        ["CM_HornOperCmd_TextTable", "0", "0", "IDLE", "", "", "", ""],
-        ["CM_HornOperCmd_TextTable", "1", "1", "HONK", "", "", "", ""],
-        ["CM_HornOperCmd_TextTable", "2", "2", "ALARM", "", "", "", ""],
+        ["CM_HornOperCmd_TextTable", "0", "0", "OFF", "", "", "", ""],
+        ["CM_HornOperCmd_TextTable", "1", "1", "ON", "", "", "", ""],
+        ["CM_HornOperCmd_TextTable", "255", "255", "INVALID", "", "", "", ""],
     ],
     "DataConstrs": [
         ["boolean_DataConstr", "/AUTOSAR_Platform/DataConstrs/boolean_DataConstr", "0", "1", "Boolean constraint"],
         ["DC_App_HornCmd", "/HORN_CTRL/DataConstrs/DC_App_HornCmd", "0", "255", ""],
         ["DC_App_HornActSts", "/HORN_CTRL/DataConstrs/DC_App_HornActSts", "0", "255", ""],
-        ["DC_App_Volt", "/HORN_CTRL/DataConstrs/DC_App_Volt", "0", "180", "0-18V in 0.1V steps"],
-        ["DC_App_Curr", "/HORN_CTRL/DataConstrs/DC_App_Curr", "0", "500", "0-5A in 0.01A steps"],
+        ["DC_App_Volt", "/HORN_CTRL/DataConstrs/DC_App_Volt", "0", "65535", "Voltage raw range"],
+        ["DC_App_Curr", "/HORN_CTRL/DataConstrs/DC_App_Curr", "0", "65535", "Current raw range"],
         ["DC_App_DutyRat", "/HORN_CTRL/DataConstrs/DC_App_DutyRat", "0", "1000", "0-100% in 0.1% steps"],
     ],
     "SRInterfaces": [
@@ -174,13 +210,13 @@ EXAMPLE_ROWS: dict[str, list[list[str]]] = {
         ["BOD_HornCtrl_Enh", "Rp_Horn_Atm_SR", "R", "SR", "/HORN_CTRL/Interfaces/If_HornActSts_SR", "ntfHornActSts", "", "NONQUEUED-RECEIVER-COM-SPEC", "0", "", "false", "NONE", "0", "Receiver: horn status"],
         ["BOD_HornCtrl_Enh", "Rp_Volt_SR", "R", "SR", "/HORN_CTRL/Interfaces/If_Volt_SR", "ntfVolt", "", "NONQUEUED-RECEIVER-COM-SPEC", "0", "", "false", "NONE", "120", "Receiver: voltage with init value"],
         ["BOD_HornCtrl_Enh", "Pp_BOD_HornCtrl_Enh_CS", "P", "CS", "/HORN_CTRL/Interfaces/If_BOD_HornCtrl_Enh_CS", "", "rrHornCtrl", "SERVER-COM-SPEC", "", "1", "", "", "", "Server: handle horn control"],
-        ["BOD_HornCtrl_Enh", "Pp_SrvOperSts_SR", "P", "SR", "/HORN_CTRL/Interfaces/If_SrvOperSts_SR", "ntfSrvOperSts", "", "NONQUEUED-SENDER-COM-SPEC", "", "", "", "", "0", "Sender: service status"],
+        ["BOD_HornCtrl_Enh", "Pp_SrvOperSts_SR", "P", "SR", "/HORN_CTRL/Interfaces/If_SrvOperSts_SR", "ntfSrvOperSts", "", "NONQUEUED-SENDER-COM-SPEC", "", "", "", "", "0", "Record", "Sender: service status"],
         # BOD_ChildLeftBehindAlert_Scen (Scenario layer)
         ["BOD_ChildLeftBehindAlert_Scen", "Rp_HornCtrl_Enh_CS", "R", "CS", "/HORN_CTRL/Interfaces/If_BOD_HornCtrl_Enh_CS", "", "rrHornCtrl", "CLIENT-COM-SPEC", "0", "", "", "", "", "Client: call horn control (multi-op port)"],
         ["BOD_ChildLeftBehindAlert_Scen", "Pp_Scen_getSrvOperSts", "P", "CS", "/HORN_CTRL/Interfaces/getSrvOperSts", "", "getSrvOperSts", "SERVER-COM-SPEC", "", "1", "", "", "", "Server: provide service op status"],
-        ["BOD_ChildLeftBehindAlert_Scen", "Pp_Scen_SrvOperSts_SR", "P", "SR", "/HORN_CTRL/Interfaces/If_SrvOperSts_SR", "ntfSrvOperSts", "", "NONQUEUED-SENDER-COM-SPEC", "", "", "", "", "0", "Sender: service status"],
+        ["BOD_ChildLeftBehindAlert_Scen", "Pp_Scen_SrvOperSts_SR", "P", "SR", "/HORN_CTRL/Interfaces/If_SrvOperSts_SR", "ntfSrvOperSts", "", "NONQUEUED-SENDER-COM-SPEC", "", "", "", "", "0", "Record", "Sender: service status"],
         ["BOD_ChildLeftBehindAlert_Scen", "Rp_HornActSts_SR", "R", "SR", "/HORN_CTRL/Interfaces/If_HornActSts_SR", "ntfHornActSts", "", "NONQUEUED-RECEIVER-COM-SPEC", "0", "", "false", "NONE", "0", "Receiver: horn status"],
-        ["BOD_ChildLeftBehindAlert_Scen", "Rp_SrvOperSts_SR", "R", "SR", "/HORN_CTRL/Interfaces/If_SrvOperSts_SR", "ntfSrvOperSts", "", "NONQUEUED-RECEIVER-COM-SPEC", "0", "", "false", "NONE", "0", "Receiver: service status"],
+        ["BOD_ChildLeftBehindAlert_Scen", "Rp_SrvOperSts_SR", "R", "SR", "/HORN_CTRL/Interfaces/If_SrvOperSts_SR", "ntfSrvOperSts", "", "NONQUEUED-RECEIVER-COM-SPEC", "0", "", "false", "NONE", "0", "Record", "Receiver: service status"],
         # BOD_SerchCar_Gen (Scenario layer - test component)
         ["BOD_SerchCar_Gen", "Rp_BOD_HornCtrl_Enh_CS", "R", "CS", "/HORN_CTRL/Interfaces/If_BOD_HornCtrl_Enh_CS", "", "rrHornCtrl", "CLIENT-COM-SPEC", "0", "", "", "", "", "Client: call horn control"],
         ["BOD_SerchCar_Gen", "Pp_Volt_SR", "P", "SR", "/HORN_CTRL/Interfaces/If_Volt_SR", "ntfVolt", "", "NONQUEUED-SENDER-COM-SPEC", "", "", "", "", "120", "Sender: voltage with init"],
@@ -259,7 +295,7 @@ def create_template_v2(path: Path) -> None:
             cell.font = Font(bold=True)
             cell.fill = header_fill
         for row in EXAMPLE_ROWS.get(sheet_name, []):
-            sheet.append(row)
+            sheet.append(_normalize_example_row(sheet_name, row))
         sheet.freeze_panes = "A2"
         for column in sheet.columns:
             width = max(len(str(cell.value or "")) for cell in column) + 2
@@ -277,10 +313,11 @@ def _add_validations(workbook: Workbook) -> None:
         "SRInterfaces": {"C": '"true,false"'},
         "CSInterfaces": {"C": '"true,false"'},
         "CSArguments": {"D": '"IN,OUT,INOUT"'},
-        "Ports": {"C": '"P,R"', "D": '"SR,CS"', "H": '"CLIENT-COM-SPEC,SERVER-COM-SPEC,NONQUEUED-SENDER-COM-SPEC,NONQUEUED-RECEIVER-COM-SPEC,QUEUED-SENDER-COM-SPEC,QUEUED-RECEIVER-COM-SPEC"'},
+        "PortRecordInitValues": {"E": '"Value,Numeric,Enum,Boolean,String,Record"'},
+        "Ports": {"C": '"P,R"', "D": '"SR,CS"', "H": '"CLIENT-COM-SPEC,SERVER-COM-SPEC,NONQUEUED-SENDER-COM-SPEC,NONQUEUED-RECEIVER-COM-SPEC,QUEUED-SENDER-COM-SPEC,QUEUED-RECEIVER-COM-SPEC"', "L": '"true,false"', "O": '"Value,Numeric,Enum,Boolean,String,Record"'},
         "RunnableEvents": {"C": '"Init,Periodic,OperationInvoked,DataReceived"'},
         "RunnableAccesses": {"C": '"DataRead,DataWrite,ServerCallPoint"'},
-        "CompositionConnectors": {"F": '"Assembly"'},
+        "CompositionConnectors": {"F": '"Assembly,Delegation"'},
     }
     for sheet_name, column_rules in rules.items():
         sheet = workbook[sheet_name]
@@ -288,3 +325,29 @@ def _add_validations(workbook: Workbook) -> None:
             validation = DataValidation(type="list", formula1=formula, allow_blank=True)
             sheet.add_data_validation(validation)
             validation.add(f"{column}2:{column}1000")
+
+
+def _normalize_example_row(sheet_name: str, row: list[str]) -> list[str]:
+    row = [_normalize_davinci_path(value) for value in row]
+    if sheet_name == "Ports":
+        if len(row) == 14:
+            return [*row[:11], "false", row[11], row[12], "", row[13]]
+        if len(row) == 15:
+            return [*row[:11], "false", row[11], row[12], row[13], row[14]]
+    return row
+
+
+def _normalize_davinci_path(value: str) -> str:
+    if not isinstance(value, str):
+        return value
+    replacements = {
+        "/HORN_CTRL/Interfaces": "/PortInterfaces",
+        "/HORN_CTRL/ApplicationDataTypes": "/DataTypes",
+        "/HORN_CTRL/ImplementationDataTypes": "/DataTypes",
+        "/HORN_CTRL/CompuMethods": "/DataTypes/CompuMethods",
+        "/HORN_CTRL/DataConstrs": "/DataTypes/DataConstrs",
+        "/HORN_CTRL/Units": "/DataTypes/Units",
+    }
+    for old, new in replacements.items():
+        value = value.replace(old, new)
+    return value

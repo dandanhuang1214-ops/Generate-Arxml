@@ -257,6 +257,32 @@ def validate_model_v2(model: WorkbookV2Model) -> list[str]:
         if row.composition_name not in compositions:
             errors.append(f"{loc(row, 'CompositionName')} unknown composition '{row.composition_name}'.")
             continue
+        if row.connector_type.lower() == "delegation":
+            provider_is_outer = row.provider_prototype == row.composition_name
+            requester_is_outer = row.requester_prototype == row.composition_name
+            if provider_is_outer == requester_is_outer:
+                errors.append(f"{loc(row, 'ConnectorType')} delegation connector must connect one composition outer port to one inner prototype port.")
+                continue
+            inner_proto_name = row.requester_prototype if provider_is_outer else row.provider_prototype
+            inner_port_name = row.requester_port if provider_is_outer else row.provider_port
+            inner_proto = prototypes.get((row.composition_name, inner_proto_name))
+            if inner_proto is None:
+                errors.append(f"{loc(row, 'ConnectorType')} unknown inner prototype '{inner_proto_name}'.")
+                continue
+            inner_port = ports.get((inner_proto.component_type_name, inner_port_name))
+            if inner_port is None:
+                errors.append(f"{loc(row, 'ConnectorType')} unknown inner port '{inner_proto.component_type_name}/{inner_port_name}'.")
+                continue
+            expected_outer_direction = inner_port.port_direction
+            outer_port_name = row.provider_port if provider_is_outer else row.requester_port
+            outer_port = ports.get((row.composition_name, outer_port_name))
+            if outer_port and (
+                outer_port.port_direction != expected_outer_direction
+                or outer_port.interface_kind != inner_port.interface_kind
+                or outer_port.interface_ref != inner_port.interface_ref
+            ):
+                errors.append(f"{loc(row, 'ConnectorType')} delegation outer port must match inner port direction/interface.")
+            continue
         provider_proto = prototypes.get((row.composition_name, row.provider_prototype))
         requester_proto = prototypes.get((row.composition_name, row.requester_prototype))
         if provider_proto is None:
@@ -314,6 +340,11 @@ def _write_compu_methods(packages: etree._Element, model: WorkbookV2Model) -> No
     scales = defaultdict(list)
     for row in model.compu_scales:
         scales[row.compu_method_name].append(row)
+    unit_by_compu_path = {
+        row.compu_method_ref: (row.unit_ref or "/DataTypes/Units/No_Unit")
+        for row in model.primitive_data_types
+        if row.compu_method_ref
+    }
     for row in model.compu_methods:
         elements = _elements(_package(packages, _pkg(row.compu_method_path)))
         compu = _el(elements, "COMPU-METHOD", uuid=_uuid())
@@ -329,10 +360,15 @@ def _write_compu_methods(packages: etree._Element, model: WorkbookV2Model) -> No
                 const = _el(sc, "COMPU-CONST")
                 _el(const, "VT", scale.text_value)
         elif row.category.upper() == "LINEAR":
+            _el(compu, "UNIT-REF", unit_by_compu_path.get(row.compu_method_path, "/DataTypes/Units/No_Unit"), DEST="UNIT")
             internal = _el(compu, "COMPU-INTERNAL-TO-PHYS")
             scale_node = _el(internal, "COMPU-SCALES")
             scale = scales.get(row.compu_method_name, [None])[0]
             sc = _el(scale_node, "COMPU-SCALE")
+            if scale and scale.lower_limit:
+                _el(sc, "LOWER-LIMIT", scale.lower_limit, **{"INTERVAL-TYPE": "CLOSED"})
+            if scale and scale.upper_limit:
+                _el(sc, "UPPER-LIMIT", scale.upper_limit, **{"INTERVAL-TYPE": "CLOSED"})
             coeffs = _el(sc, "COMPU-RATIONAL-COEFFS")
             numerator = _el(coeffs, "COMPU-NUMERATOR")
             _el(numerator, "V", (scale.offset if scale and scale.offset else "0"))
@@ -501,11 +537,11 @@ def _write_components(packages: etree._Element, model: WorkbookV2Model) -> None:
             _el(node, "SHORT-NAME", comp.component_name)
             ports = _el(node, "PORTS")
             for port in ports_by_component.get(comp.component_name, []):
-                _write_port(ports, port)
+                _write_port(ports, port, model)
             _write_behavior(node, comp, model, runnables_by_component[comp.component_name], events_by_component[comp.component_name], accesses_by_component[comp.component_name])
 
 
-def _write_port(parent: etree._Element, port) -> None:
+def _write_port(parent: etree._Element, port, model: WorkbookV2Model) -> None:
     pdir = port.port_direction.upper()
     kind = port.interface_kind.upper()
     node = _el(parent, "P-PORT-PROTOTYPE" if pdir == "P" else "R-PORT-PROTOTYPE", uuid=_uuid())
@@ -515,7 +551,8 @@ def _write_port(parent: etree._Element, port) -> None:
         if kind == "SR":
             spec = _el(specs, port.com_spec_kind or "NONQUEUED-SENDER-COM-SPEC")
             _el(spec, "DATA-ELEMENT-REF", f"{port.interface_ref}/{port.data_element_name}", DEST="VARIABLE-DATA-PROTOTYPE")
-            _init_value(spec, port.init_value or "0")
+            _el(spec, "USES-END-TO-END-PROTECTION", "false")
+            _init_value(spec, port, model)
             _el(node, "PROVIDED-INTERFACE-TREF", port.interface_ref, DEST="SENDER-RECEIVER-INTERFACE")
         else:
             spec = _el(specs, port.com_spec_kind or "SERVER-COM-SPEC")
@@ -527,11 +564,15 @@ def _write_port(parent: etree._Element, port) -> None:
         if kind == "SR":
             spec = _el(specs, port.com_spec_kind or "NONQUEUED-RECEIVER-COM-SPEC")
             _el(spec, "DATA-ELEMENT-REF", f"{port.interface_ref}/{port.data_element_name}", DEST="VARIABLE-DATA-PROTOTYPE")
+            _el(spec, "USES-END-TO-END-PROTECTION", "false")
             _el(spec, "ALIVE-TIMEOUT", port.alive_timeout or "0")
             _el(spec, "ENABLE-UPDATE", (port.enable_update or "false").lower())
-            _init_value(spec, port.init_value or "0")
-            _el(spec, "HANDLE-NEVER-RECEIVED", "false")
-            _el(spec, "HANDLE-TIMEOUT-TYPE", port.handle_timeout_type or "NONE")
+            filt = _el(spec, "FILTER")
+            _el(filt, "DATA-FILTER-TYPE", "ALWAYS")
+            _el(spec, "HANDLE-NEVER-RECEIVED", (port.handle_never_received or "false").lower())
+            _init_value(spec, port, model)
+            if port.handle_timeout_type and port.handle_timeout_type.upper() != "NONE":
+                _el(spec, "HANDLE-TIMEOUT-TYPE", port.handle_timeout_type)
             _el(node, "REQUIRED-INTERFACE-TREF", port.interface_ref, DEST="SENDER-RECEIVER-INTERFACE")
         else:
             spec = _el(specs, port.com_spec_kind or "CLIENT-COM-SPEC")
@@ -559,7 +600,6 @@ def _write_behavior(parent: etree._Element, comp, model: WorkbookV2Model, runnab
         _el(r, "SHORT-NAME", runnable.runnable_name)
         _el(r, "MINIMUM-START-INTERVAL", "0")
         _el(r, "CAN-BE-INVOKED-CONCURRENTLY", "false")
-        _el(r, "SYMBOL", runnable.symbol or runnable.runnable_name)
         call_points = [a for a in accesses_by_runnable.get(runnable.runnable_name, []) if a.access_type == "ServerCallPoint"]
         if call_points:
             cps = _el(r, "SERVER-CALL-POINTS")
@@ -571,6 +611,31 @@ def _write_behavior(parent: etree._Element, comp, model: WorkbookV2Model, runnab
                 _el(iref, "CONTEXT-R-PORT-REF", f"{comp.package_path}/{comp.component_name}/{call.port_name}", DEST="R-PORT-PROTOTYPE")
                 _el(iref, "TARGET-REQUIRED-OPERATION-REF", f"{p.interface_ref}/{call.operation_name}", DEST="CLIENT-SERVER-OPERATION")
                 _el(sc, "TIMEOUT", "0")
+        data_reads = [a for a in accesses_by_runnable.get(runnable.runnable_name, []) if a.access_type == "DataRead"]
+        if data_reads:
+            receive_points = _el(r, "DATA-RECEIVE-POINT-BY-ARGUMENTS")
+            for access in data_reads:
+                p = ports[access.port_name]
+                data_element = access.data_element_name or p.data_element_name
+                va = _el(receive_points, "VARIABLE-ACCESS", uuid=_uuid())
+                _el(va, "SHORT-NAME", access.access_name or f"REC_{access.port_name}_{data_element}")
+                accessed = _el(va, "ACCESSED-VARIABLE")
+                iref = _el(accessed, "AUTOSAR-VARIABLE-IREF")
+                _el(iref, "PORT-PROTOTYPE-REF", f"{comp.package_path}/{comp.component_name}/{access.port_name}", DEST="R-PORT-PROTOTYPE")
+                _el(iref, "TARGET-DATA-PROTOTYPE-REF", f"{p.interface_ref}/{data_element}", DEST="VARIABLE-DATA-PROTOTYPE")
+        data_writes = [a for a in accesses_by_runnable.get(runnable.runnable_name, []) if a.access_type == "DataWrite"]
+        if data_writes:
+            send_points = _el(r, "DATA-SEND-POINTS")
+            for access in data_writes:
+                p = ports[access.port_name]
+                data_element = access.data_element_name or p.data_element_name
+                va = _el(send_points, "VARIABLE-ACCESS", uuid=_uuid())
+                _el(va, "SHORT-NAME", access.access_name or f"SEND_{access.port_name}_{data_element}")
+                accessed = _el(va, "ACCESSED-VARIABLE")
+                iref = _el(accessed, "AUTOSAR-VARIABLE-IREF")
+                _el(iref, "PORT-PROTOTYPE-REF", f"{comp.package_path}/{comp.component_name}/{access.port_name}", DEST="P-PORT-PROTOTYPE")
+                _el(iref, "TARGET-DATA-PROTOTYPE-REF", f"{p.interface_ref}/{data_element}", DEST="VARIABLE-DATA-PROTOTYPE")
+        _el(r, "SYMBOL", runnable.symbol or runnable.runnable_name)
 
     for event in events:
         runnable_ref = f"{comp.package_path}/{comp.component_name}/{behavior_name}/{event.runnable_name}"
@@ -605,6 +670,11 @@ def _write_behavior(parent: etree._Element, comp, model: WorkbookV2Model, runnab
 def _write_composition(parent: etree._Element, comp, model: WorkbookV2Model) -> None:
     protos = [row for row in model.component_prototypes if row.composition_name == comp.component_name]
     proto_types = {row.prototype_name: row for row in protos}
+    delegation_ports = _composition_delegation_ports(comp, model, proto_types)
+    if delegation_ports:
+        ports_node = _el(parent, "PORTS")
+        for port in delegation_ports:
+            _write_port(ports_node, port, model)
     comps = _el(parent, "COMPONENTS")
     for proto in protos:
         p = _el(comps, "SW-COMPONENT-PROTOTYPE", uuid=_uuid())
@@ -615,27 +685,182 @@ def _write_composition(parent: etree._Element, comp, model: WorkbookV2Model) -> 
         nodes = _el(parent, "CONNECTORS")
         component_by_name = {row.component_name: row for row in model.components}
         for row in connectors:
-            provider_proto = proto_types[row.provider_prototype]
-            requester_proto = proto_types[row.requester_prototype]
-            provider_comp = component_by_name[provider_proto.component_type_name]
-            requester_comp = component_by_name[requester_proto.component_type_name]
-            c = _el(nodes, "ASSEMBLY-SW-CONNECTOR", uuid=_uuid())
-            _el(c, "SHORT-NAME", f"{row.provider_prototype}_{row.provider_port}_{row.requester_prototype}_{row.requester_port}")
-            pi = _el(c, "PROVIDER-IREF")
-            _el(pi, "CONTEXT-COMPONENT-REF", f"{comp.package_path}/{comp.component_name}/{row.provider_prototype}", DEST="SW-COMPONENT-PROTOTYPE")
-            _el(pi, "TARGET-P-PORT-REF", f"{provider_comp.package_path}/{provider_comp.component_name}/{row.provider_port}", DEST="P-PORT-PROTOTYPE")
-            ri = _el(c, "REQUESTER-IREF")
-            _el(ri, "CONTEXT-COMPONENT-REF", f"{comp.package_path}/{comp.component_name}/{row.requester_prototype}", DEST="SW-COMPONENT-PROTOTYPE")
-            _el(ri, "TARGET-R-PORT-REF", f"{requester_comp.package_path}/{requester_comp.component_name}/{row.requester_port}", DEST="R-PORT-PROTOTYPE")
+            if row.connector_type.lower() == "delegation":
+                _write_delegation_connector(nodes, comp, row, model, proto_types, component_by_name)
+            else:
+                provider_proto = proto_types[row.provider_prototype]
+                requester_proto = proto_types[row.requester_prototype]
+                provider_comp = component_by_name[provider_proto.component_type_name]
+                requester_comp = component_by_name[requester_proto.component_type_name]
+                c = _el(nodes, "ASSEMBLY-SW-CONNECTOR", uuid=_uuid())
+                _el(c, "SHORT-NAME", f"{row.provider_prototype}_{row.provider_port}_{row.requester_prototype}_{row.requester_port}")
+                pi = _el(c, "PROVIDER-IREF")
+                _el(pi, "CONTEXT-COMPONENT-REF", f"{comp.package_path}/{comp.component_name}/{row.provider_prototype}", DEST="SW-COMPONENT-PROTOTYPE")
+                _el(pi, "TARGET-P-PORT-REF", f"{provider_comp.package_path}/{provider_comp.component_name}/{row.provider_port}", DEST="P-PORT-PROTOTYPE")
+                ri = _el(c, "REQUESTER-IREF")
+                _el(ri, "CONTEXT-COMPONENT-REF", f"{comp.package_path}/{comp.component_name}/{row.requester_prototype}", DEST="SW-COMPONENT-PROTOTYPE")
+                _el(ri, "TARGET-R-PORT-REF", f"{requester_comp.package_path}/{requester_comp.component_name}/{row.requester_port}", DEST="R-PORT-PROTOTYPE")
 
 
-def _init_value(parent: etree._Element, value: str) -> None:
+def _composition_delegation_ports(comp, model: WorkbookV2Model, proto_types: dict) -> list:
+    ports_by_component = {(row.component_name, row.port_name): row for row in model.ports}
+    result = []
+    seen: set[str] = set()
+    for row in model.composition_connectors:
+        if row.composition_name != comp.component_name or row.connector_type.lower() != "delegation":
+            continue
+        provider_is_outer = row.provider_prototype == comp.component_name
+        requester_is_outer = row.requester_prototype == comp.component_name
+        if provider_is_outer == requester_is_outer:
+            continue
+        outer_port_name = row.provider_port if provider_is_outer else row.requester_port
+        if outer_port_name in seen:
+            continue
+        explicit_outer = ports_by_component.get((comp.component_name, outer_port_name))
+        if explicit_outer:
+            result.append(explicit_outer)
+            seen.add(outer_port_name)
+            continue
+        inner_proto_name = row.requester_prototype if provider_is_outer else row.provider_prototype
+        inner_port_name = row.requester_port if provider_is_outer else row.provider_port
+        inner_proto = proto_types.get(inner_proto_name)
+        if inner_proto is None:
+            continue
+        inner_port = ports_by_component.get((inner_proto.component_type_name, inner_port_name))
+        if inner_port is None:
+            continue
+        result.append(_clone_composition_port(inner_port, comp.component_name, outer_port_name))
+        seen.add(outer_port_name)
+    return result
+
+
+def _clone_composition_port(inner_port, composition_name: str, outer_port_name: str):
+    return type(inner_port)(
+        source_sheet=inner_port.source_sheet,
+        row_index=inner_port.row_index,
+        component_name=composition_name,
+        port_name=outer_port_name,
+        port_direction=inner_port.port_direction,
+        interface_kind=inner_port.interface_kind,
+        interface_ref=inner_port.interface_ref,
+        data_element_name=inner_port.data_element_name,
+        operation_name=inner_port.operation_name,
+        com_spec_kind=inner_port.com_spec_kind,
+        alive_timeout=inner_port.alive_timeout,
+        queue_length=inner_port.queue_length,
+        enable_update=inner_port.enable_update,
+        handle_never_received=inner_port.handle_never_received,
+        handle_timeout_type=inner_port.handle_timeout_type,
+        init_value=inner_port.init_value,
+        init_value_type=inner_port.init_value_type,
+    )
+
+
+def _write_delegation_connector(nodes: etree._Element, comp, row, model: WorkbookV2Model, proto_types: dict, component_by_name: dict) -> None:
+    provider_is_outer = row.provider_prototype == comp.component_name
+    inner_proto_name = row.requester_prototype if provider_is_outer else row.provider_prototype
+    inner_port_name = row.requester_port if provider_is_outer else row.provider_port
+    outer_port_name = row.provider_port if provider_is_outer else row.requester_port
+    inner_proto = proto_types[inner_proto_name]
+    inner_comp = component_by_name[inner_proto.component_type_name]
+    inner_port = next(port for port in model.ports if port.component_name == inner_comp.component_name and port.port_name == inner_port_name)
+    port_dest = "P-PORT-PROTOTYPE" if inner_port.port_direction == "P" else "R-PORT-PROTOTYPE"
+    context_tag = "TARGET-P-PORT-REF" if inner_port.port_direction == "P" else "TARGET-R-PORT-REF"
+
+    c = _el(nodes, "DELEGATION-SW-CONNECTOR", uuid=_uuid())
+    _el(c, "SHORT-NAME", f"{row.provider_prototype}_{row.provider_port}_{row.requester_prototype}_{row.requester_port}")
+    iref = _el(c, "INNER-PORT-IREF")
+    _el(iref, "CONTEXT-COMPONENT-REF", f"{comp.package_path}/{comp.component_name}/{inner_proto_name}", DEST="SW-COMPONENT-PROTOTYPE")
+    _el(iref, context_tag, f"{inner_comp.package_path}/{inner_comp.component_name}/{inner_port_name}", DEST=port_dest)
+    _el(c, "OUTER-PORT-REF", f"{comp.package_path}/{comp.component_name}/{outer_port_name}", DEST=port_dest)
+
+
+def _init_value(parent: etree._Element, port, model: WorkbookV2Model) -> None:
+    value = port.init_value or "0"
+    kind = (port.init_value_type or "Value").strip().lower()
     init = _el(parent, "INIT-VALUE")
-    spec = _el(init, "APPLICATION-VALUE-SPECIFICATION")
-    _el(spec, "CATEGORY", "VALUE")
+    if kind == "record":
+        _record_init_value(init, port, model)
+        return
+    _scalar_value_spec(init, value, kind)
+
+
+def _record_init_value(parent: etree._Element, port, model: WorkbookV2Model) -> None:
+    spec = _el(parent, "RECORD-VALUE-SPECIFICATION")
+    fields = _el(spec, "FIELDS")
+    rows = [
+        row
+        for row in model.port_record_init_values
+        if row.component_name == port.component_name and row.port_name == port.port_name
+    ]
+    record_type = _record_type_for_port(port, model)
+    order_by_element = {
+        row.element_name: int(row.order or 0)
+        for row in model.record_elements
+        if row.record_type_name == record_type
+    }
+    rows.sort(key=lambda row: order_by_element.get(row.record_element_path.split(".")[0], 9999))
+    for row in rows:
+        _field_value_spec(fields, row.record_element_path, row.value, row.value_type)
+
+
+def _field_value_spec(parent: etree._Element, label: str, value: str, value_type: str) -> None:
+    kind = (value_type or "Value").strip().lower()
+    if kind in {"enum", "boolean", "string"}:
+        spec = _el(parent, "TEXT-VALUE-SPECIFICATION")
+        _el(spec, "SHORT-LABEL", label)
+        _el(spec, "VALUE", _normalize_init_value_text(value, kind))
+    else:
+        spec = _el(parent, "NUMERICAL-VALUE-SPECIFICATION")
+        _el(spec, "SHORT-LABEL", label)
+        _el(spec, "VALUE", value)
+
+
+def _scalar_value_spec(parent: etree._Element, value: str, kind: str) -> etree._Element:
+    spec = _el(parent, "APPLICATION-VALUE-SPECIFICATION")
+    _el(spec, "CATEGORY", "BOOLEAN" if kind == "boolean" else "VALUE")
     sw_vc = _el(spec, "SW-VALUE-CONT")
     sw_phys = _el(sw_vc, "SW-VALUES-PHYS")
-    _el(sw_phys, "V", value)
+    if kind in {"enum", "string"}:
+        _el(sw_phys, "VT", _normalize_init_value_text(value, kind))
+    elif kind == "boolean":
+        _el(sw_phys, "V", _normalize_boolean_numeric(value))
+    else:
+        _el(sw_phys, "V", value)
+    return spec
+
+
+def _normalize_boolean_numeric(value: str) -> str:
+    text = str(value or "").strip().lower()
+    if text in {"1", "true", "t", "yes", "on"}:
+        return "1"
+    return "0"
+
+
+def _normalize_init_value_text(value: str, kind: str) -> str:
+    text = str(value or "").strip()
+    if kind == "boolean":
+        if text.lower() in {"1", "true", "t", "yes"}:
+            return "true"
+        if text.lower() in {"0", "false", "f", "no"}:
+            return "false"
+    return text
+
+
+def _record_type_for_port(port, model: WorkbookV2Model) -> str:
+    sr_iface_by_path = {row.interface_path: row for row in model.sr_interfaces}
+    sr_element_by_iface = {
+        (row.interface_name, row.data_element_name): row
+        for row in model.sr_data_elements
+    }
+    record_by_path = {row.application_type_path: row.application_type_name for row in model.record_types}
+    iface = sr_iface_by_path.get(port.interface_ref)
+    if iface is None:
+        return ""
+    data_element = sr_element_by_iface.get((iface.interface_name, port.data_element_name))
+    if data_element is None:
+        return ""
+    return record_by_path.get(data_element.application_type_ref, "")
 
 
 def _sw_props(parent: etree._Element) -> etree._Element:
