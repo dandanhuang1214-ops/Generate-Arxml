@@ -103,8 +103,8 @@ def extract_contract_from_docx(path: Path, *, mode: str = "signal") -> DeliveryC
 
     for table in blocks.tables:
         headers = [_norm_header(header) for header in table.headers]
-        if _has(headers, "字段") and _has(headers, "示例"):
-            _apply_project_info(contract, table)
+        if _has(headers, "字段") and (_has(headers, "填写值") or _has(headers, "示例")):
+            _apply_project_info_v2(contract, table)
         elif _has(headers, "swc名称") or _has(headers, "swc 名称"):
             contract.swcs.extend(_extract_swcs(table))
         elif _has(headers, "swcname") or (_has(headers, "prototypename") and _has(headers, "swc")):
@@ -167,6 +167,49 @@ def extract_contract_from_docx(path: Path, *, mode: str = "signal") -> DeliveryC
     return contract
 
 
+def _apply_project_info_v2(contract: DeliveryContract, table: DocxTable) -> None:
+    """Parse the project table used by the current signal/SOA templates."""
+    values: dict[str, str] = {}
+    for row in table.rows:
+        key = _pick(row, "字段")
+        value = _pick(row, "填写值", "值", "内容", "示例")
+        if key and value and value != "-":
+            values[_norm_header(key)] = value.strip()
+
+    system_name = _first_value(values, "项目/系统名称", "项目系统名称", "系统名称", "项目名称")
+    autosar_version = _first_value(values, "目标 AUTOSAR 版本", "AUTOSAR版本", "AUTOSARVersion")
+    generation_profile = _first_value(values, "生成模式", "GenerationProfile", "Profile")
+    root_package = _first_value(values, "RootPackage", "根包路径", "根包")
+    composition_name = _first_value(values, "默认 Composition 名称", "Composition名称")
+    domain = _first_value(values, "Domain", "域", "部署域")
+
+    if system_name:
+        contract.project.system_name = _short_name(system_name)
+        contract.project.source_status["system_name"] = "explicit"
+    if root_package:
+        if root_package.startswith("/"):
+            contract.project.root_package = root_package
+            contract.project.source_status["root_package"] = "explicit"
+        elif "davinci" in root_package.lower() or "默认路径" in root_package:
+            contract.project.root_package = "/ComponentTypes"
+            contract.project.source_status["root_package"] = "defaulted"
+    elif generation_profile == "mixed_signal_soa":
+        contract.project.root_package = "/ComponentTypes"
+        contract.project.source_status["root_package"] = "defaulted"
+    if autosar_version:
+        contract.project.target_autosar_version = autosar_version
+        contract.project.source_status["target_autosar_version"] = "explicit"
+    if generation_profile:
+        contract.project.generation_profile = generation_profile.strip()
+        contract.project.source_status["generation_profile"] = "explicit"
+    if composition_name:
+        contract.project.composition_name = _short_name(composition_name)
+        contract.project.source_status["composition_name"] = "explicit"
+    if domain:
+        contract.project.domain = domain
+        contract.project.source_status["domain"] = "explicit"
+
+
 def _apply_project_info(contract: DeliveryContract, table: DocxTable) -> None:
     values: dict[str, str] = {}
     for row in table.rows:
@@ -191,71 +234,6 @@ def _apply_project_info(contract: DeliveryContract, table: DocxTable) -> None:
     if domain:
         contract.project.domain = domain
         contract.project.source_status["domain"] = "explicit"
-
-
-def _extract_swcs(table: DocxTable) -> list[SwcContract]:
-    rows = []
-    for row in table.rows:
-        name = _pick(row, "SWC名称", "SWC 名称", "名称")
-        if not name or name.lower() in {"swc名称", "swc 名称"}:
-            continue
-        kind = _pick(row, "SWC类型", "类型", "是否 Composition") or "Application"
-        rows.append(
-            SwcContract(
-                name=_short_name(name),
-                prototype_name=_short_name(_pick(row, "PrototypeName")),
-                kind=_normalize_swc_kind(kind),
-                layer=_pick(row, "所属层级", "服务部署"),
-                domain=_pick(row, "部署域", "服务部署"),
-                is_composition=_pick(row, "是否Composition"),
-                description=_pick(row, "说明", "SWC描述"),
-                requirement_id=_pick(row, "RequirementId", "需求ID"),
-                source_status={"name": "explicit", "kind": status_for(kind, "explicit")},
-            )
-        )
-    return rows
-
-
-def _extract_record_elements(table: DocxTable) -> list[RecordElementContract]:
-    rows = []
-    for row in table.rows:
-        record_type = _pick(row, "RecordType", "结构体名")
-        element_name = _pick(row, "ElementName", "FieldName", "字段名")
-        if not record_type or not element_name:
-            continue
-        field_category = _pick(row, "FieldCategory", "字段类别")
-        internal_range = _pick(row, "InternalRange", "内部范围")
-        physical_range = _pick(row, "PhysicalRange", "物理范围")
-        enum_values = _normalize_enum_values(_pick(row, "EnumValues", "状态值表", "枚举值"))
-        value_info = enum_values or internal_range or _pick(row, "Range/Enum", "Range", "取值范围/枚举")
-        app_field_type = _pick(row, "ApplicationFieldType", "应用字段类型")
-        impl_field_type = _pick(row, "ImplementationFieldType", "内部字段类型")
-        rows.append(
-            RecordElementContract(
-                record_type=_short_name(record_type),
-                implementation_record_type=_short_name(_pick(row, "ImplementationRecordType")),
-                field_order=_pick(row, "FieldOrder"),
-                element_name=_short_name(element_name),
-                field_category=_normalize_value_type(field_category),
-                data_type=_short_name(app_field_type or _pick(row, "DataType", "字段类型", "数据类型", "内部数据类型", "建议数据类型")),
-                implementation_field_type=_short_name(impl_field_type),
-                internal_range=internal_range,
-                physical_range=physical_range,
-                resolution=_pick(row, "Resolution"),
-                offset=_pick(row, "Offset"),
-                range_or_enum=value_info,
-                unit=_pick(row, "Unit", "单位"),
-                init_value=_pick(row, "InitValue", "初值", "初始值"),
-                description=_pick(row, "Description", "说明"),
-                source_trace=_source_trace(row),
-                source_status={
-                    "record_type": "explicit",
-                    "element_name": "explicit",
-                    "data_type": status_for(_pick(row, "DataType", "字段类型", "数据类型")),
-                },
-            )
-        )
-    return rows
 
 
 def _extract_signals(table: DocxTable) -> list[SignalContract]:
@@ -340,45 +318,6 @@ def _direction_from_signal_table(table: DocxTable) -> str:
     return ""
 
 
-def _extract_services(table: DocxTable) -> list[ServiceContract]:
-    rows = []
-    for row in table.rows:
-        service_name = _pick(row, "ServiceName", "服务名", "服务接口", "端口/服务名")
-        operation = _pick(row, "OperationName", "Operation", "Operation名", "操作名")
-        owner_swc = _pick(row, "OwnerSWC", "ProviderSWC", "服务提供方", "所属SWC")
-        interface_name = _pick(row, "InterfaceName", "接口名") or service_name
-        port_name = _pick(row, "PortName", "端口名") or service_name or interface_name
-        port_role = _pick(row, "PortRole", "端口角色", "PortType", "端口类型")
-        communication = _pick(row, "Communication", "通信模式")
-        if not service_name and not operation and not interface_name and not port_name:
-            continue
-        rows.append(
-            ServiceContract(
-                service_name=_short_name(service_name or interface_name or operation),
-                owner_swc=_short_name(owner_swc),
-                provider_swc=_short_name(owner_swc),
-                client_swc=_short_name(_pick(row, "ClientSWC", "服务调用方")),
-                interface_name=_short_name(interface_name),
-                port_name=_short_name(port_name),
-                operation_name=_short_name(operation or service_name),
-                port_role=port_role,
-                communication=communication,
-                port_type=port_role,
-                sync_async=_pick(row, "SyncAsync", "同步异步") or "sync",
-                timeout_ms=_pick(row, "TimeoutMs", "超时"),
-                queue_length=_pick(row, "QueueLength"),
-                description=_pick(row, "Description", "说明", "接口描述"),
-                requirement_id=_pick(row, "RequirementId", "需求ID"),
-                source_trace=_source_trace(row),
-                source_status={
-                    "provider_swc": status_for(owner_swc, "explicit"),
-                    "client_swc": status_for(_pick(row, "ClientSWC", "服务调用方"), "explicit"),
-                },
-            )
-        )
-    return rows
-
-
 def _extract_swcs(table: DocxTable) -> list[SwcContract]:
     rows = []
     for row in table.rows:
@@ -404,35 +343,6 @@ def _extract_swcs(table: DocxTable) -> list[SwcContract]:
     return rows
 
 
-def _extract_operation_args(table: DocxTable) -> list[OperationArgumentContract]:
-    rows = []
-    for row in table.rows:
-        arg_name = _pick(row, "ArgumentName", "参数名")
-        if not arg_name:
-            continue
-        rows.append(
-            OperationArgumentContract(
-                interface_name=_short_name(_pick(row, "InterfaceName")),
-                operation_name=_short_name(
-                    _pick(row, "OperationName", "Operation", "Operation名", "操作名", "端口/服务名")
-                ),
-                argument_name=_short_name(arg_name),
-                direction=_normalize_arg_direction(_pick(row, "Direction", "方向")),
-                value_type=_pick(row, "ValueType", "值类型"),
-                internal_data_type=_short_name(_pick(row, "InternalDataType", "内部数据类型")),
-                data_type=_short_name(_pick(row, "DataType", "InternalDataType", "数据类型", "内部数据类型", "建议数据类型", "参数类型")),
-                range_or_enum=_pick(row, "Range/Enum", "Range", "EnumValues", "范围", "枚举", "取值范围/引用结构体"),
-                record_type=_short_name(_pick(row, "RecordType")),
-                is_record=_pick(row, "IsRecord", "是否Record"),
-                unit=_pick(row, "Unit", "单位"),
-                description=_pick(row, "Description", "说明"),
-                requirement_id=_pick(row, "RequirementId", "需求ID"),
-                source_trace=_source_trace(row),
-            )
-        )
-    return rows
-
-
 def _extract_runnables(table: DocxTable) -> list[RunnableContract]:
     rows = []
     for row in table.rows:
@@ -453,36 +363,6 @@ def _extract_runnables(table: DocxTable) -> list[RunnableContract]:
                 description=_pick(row, "Description", "说明"),
                 requirement_id=_pick(row, "RequirementId", "需求ID"),
                 source_trace=_source_trace(row),
-            )
-        )
-    return rows
-
-
-def _extract_runnable_access_rows(table: DocxTable) -> list[RunnableContract]:
-    rows = []
-    for row in table.rows:
-        runnable_name = _pick(row, "RunnableName", "Runnable名", "Runnable 名")
-        access_type = _normalize_access_type(_pick(row, "AccessType"))
-        port_or_signal = _pick(row, "PortOrSignal", "信号/端口名", "信号名", "端口名")
-        if not runnable_name or not access_type or not port_or_signal:
-            continue
-        read_signals = port_or_signal if access_type == "DataRead" else ""
-        write_signals = port_or_signal if access_type == "DataWrite" else ""
-        related_operation = _pick(row, "OperationName", "Operation") if access_type == "CallOperation" else ""
-        if access_type == "OperationInvokedEvent":
-            related_operation = _pick(row, "OperationName", "Operation")
-        rows.append(
-            RunnableContract(
-                swc=_short_name(_pick(row, "SWC", "SWC名称", "所属SWC", "所属组件")),
-                runnable_name=_short_name(runnable_name),
-                trigger_type="",
-                related_port_or_signal=_short_name(port_or_signal if access_type in {"CallOperation", "OperationInvokedEvent"} else ""),
-                related_operation=_short_name(related_operation),
-                read_signals=read_signals,
-                write_signals=write_signals,
-                description=_pick(row, "Description", "说明"),
-                source_trace=_source_trace(row),
-                source_status={"access_type": "explicit"},
             )
         )
     return rows
@@ -568,31 +448,6 @@ def _derive_data_types(contract: DeliveryContract) -> None:
             )
         )
         existing.add(signal.data_type)
-
-
-def _derive_data_types_from_service_args(contract: DeliveryContract) -> None:
-    existing = {item.type_name for item in contract.data_types}
-    for arg in contract.operation_args:
-        if not arg.data_type or arg.data_type in existing:
-            continue
-        category = "TEXTTABLE" if arg.range_or_enum and not _looks_like_range(arg.range_or_enum) else "IDENTICAL"
-        contract.data_types.append(
-            DataTypeContract(
-                type_name=arg.data_type,
-                base_type=_normalize_base_type(arg.data_type),
-                compu_method_category=category,
-                enum_values=arg.range_or_enum if category == "TEXTTABLE" else "",
-                physical_range=arg.range_or_enum if _looks_like_range(arg.range_or_enum) else "",
-                unit=arg.unit,
-                description=f"Derived from service argument {arg.operation_name}.{arg.argument_name}",
-                source_status={
-                    "type_name": "explicit",
-                    "base_type": "inferred",
-                    "compu_method_category": "inferred",
-                },
-            )
-        )
-        existing.add(arg.data_type)
 
 
 def _derive_data_types_from_records(contract: DeliveryContract) -> None:
@@ -778,22 +633,141 @@ def _derive_swcs_from_services(contract: DeliveryContract) -> None:
 
 def _add_gap_issues(contract: DeliveryContract) -> None:
     seen: set[str] = set()
+    mixed_profile = _contract_profile(contract) == "mixed_signal_soa"
+    accessed_signals = {
+        _short_name(name)
+        for runnable in contract.runnables
+        for value in (runnable.read_signals, runnable.write_signals)
+        for name in _split_list(value)
+        if _short_name(name)
+    }
     for signal in contract.signals:
         base = f"signals.{signal.signal_name}"
-        if not signal.direction:
+        # In mixed_signal_soa the signal table is an interface/type pool. The
+        # actual component direction and owner come from Runnable Access.
+        if not mixed_profile and not signal.direction:
             _append_issue_once(contract, seen, OpenIssue(base + ".direction", "确认信号方向 input/output。"))
-        if not signal.provider_swc:
+        if not mixed_profile and not signal.provider_swc:
             _append_issue_once(contract, seen, OpenIssue(base + ".provider_swc", "确认信号生产者 SWC。"))
-        if not signal.consumer_swc:
+        if not mixed_profile and not signal.consumer_swc:
             _append_issue_once(contract, seen, OpenIssue(base + ".consumer_swc", "确认信号消费者 SWC。"))
         if not signal.data_type:
             _append_issue_once(contract, seen, OpenIssue(base + ".data_type", "确认信号数据类型。"))
-        if not signal.init_value:
+        needs_port_init = not mixed_profile or _short_name(signal.signal_name) in accessed_signals
+        if needs_port_init and not signal.init_value and _normalize_value_type(signal.value_type) != "Record":
             _append_issue_once(
                 contract,
                 seen,
                 OpenIssue(base + ".init_value", "确认 InitValue；若无特殊要求建议填 0。", "0"),
             )
+
+    operations_by_port: dict[tuple[str, str], set[str]] = {}
+    for service in contract.services:
+        owner = _short_name(service.owner_swc or service.provider_swc or service.client_swc)
+        port = _short_name(service.port_name)
+        operation = _short_name(service.operation_name)
+        if owner and port and operation:
+            operations_by_port.setdefault((owner, port), set()).add(operation)
+    for (owner, port), operations in operations_by_port.items():
+        if len(operations) <= 1:
+            continue
+        _append_issue_once(
+            contract,
+            seen,
+            OpenIssue(
+                field=f"services.{owner}.{port}.operations",
+                question=(
+                    f"C/S 端口 '{owner}/{port}' 定义了多个 Operation："
+                    f"{', '.join(sorted(operations))}。AUTOSAR 标准允许该结构，"
+                    "但当前项目约定和生成链路按一个端口对应一个 Operation 使用。"
+                ),
+                suggested_default="按项目约定拆分为不同 PortName，或后续启用多 Operation ComSpec 支持。",
+                status="open",
+            ),
+        )
+
+    declarations: dict[str, set[tuple[str, str]]] = {}
+    for signal in contract.signals:
+        _register_type_declaration(
+            declarations,
+            signal.data_type,
+            signal.value_type,
+            signal.internal_data_type,
+        )
+    for argument in contract.operation_args:
+        _register_type_declaration(
+            declarations,
+            argument.data_type,
+            argument.value_type,
+            argument.internal_data_type,
+        )
+    for element in contract.record_elements:
+        _register_type_declaration(
+            declarations,
+            element.data_type,
+            element.field_category,
+            element.implementation_field_type,
+        )
+    for data_type in contract.data_types:
+        _register_type_declaration(
+            declarations,
+            data_type.type_name,
+            data_type.type_kind,
+            data_type.implementation_type_name or data_type.base_type,
+        )
+    for type_name, signatures in declarations.items():
+        if len(signatures) <= 1:
+            continue
+        details = ", ".join(
+            f"{kind}/{implementation or '-'}"
+            for kind, implementation in sorted(signatures)
+        )
+        _append_issue_once(
+            contract,
+            seen,
+            OpenIssue(
+                field=f"data_types.{type_name}.conflict",
+                question=(
+                    f"ADT '{type_name}' 在当前 /DataTypes package 下存在不一致定义：{details}。"
+                    "同一 package 内 ADT SHORT-NAME 不允许重名或改变类型。"
+                ),
+                suggested_default="统一 ADT 定义；若确需同名类型，必须使用不同的完整 package path。",
+                status="open",
+            ),
+        )
+
+
+def _register_type_declaration(
+    declarations: dict[str, set[tuple[str, str]]],
+    type_name: str,
+    type_kind: str,
+    implementation_type: str,
+) -> None:
+    name = _short_name(type_name)
+    if not name:
+        return
+    kind = _normalize_value_type(type_kind) or "Value"
+    implementation = _normalized_implementation_name(implementation_type)
+    declarations.setdefault(name, set()).add((kind, implementation))
+
+
+def _normalized_implementation_name(value: str) -> str:
+    short = _short_name(value)
+    lower = short.lower()
+    if lower in {
+        "boolean",
+        "bool",
+        "uint8",
+        "uint16",
+        "uint32",
+        "uint64",
+        "sint8",
+        "sint16",
+        "sint32",
+        "float32",
+    }:
+        return "boolean" if lower == "bool" else lower
+    return short
 
 
 def _table_rows(tbl: ET.Element) -> list[list[str]]:
@@ -922,34 +896,6 @@ def _normalize_swc_kind(value: str) -> str:
 def _normalize_arg_direction(value: str) -> str:
     text = (value or "").upper()
     return text if text in {"IN", "OUT", "INOUT"} else ""
-
-
-def _normalize_trigger(value: str) -> str:
-    text = (value or "").lower()
-    if "周期" in value or "period" in text:
-        return "Periodic"
-    if "init" in text or "初始化" in value:
-        return "Init"
-    if "operationinvokedevent" in text or "operationinvoked" in text:
-        return "OperationInvoked"
-    if "operation" in text or "服务" in value:
-        return "OperationInvoked"
-    if "data" in text or "信号" in value:
-        return "DataReceived"
-    return value
-
-
-def _normalize_access_type(value: str) -> str:
-    text = (value or "").strip().lower()
-    if text in {"dataread", "read", "读取"} or "read" in text or "读取" in value:
-        return "DataRead"
-    if text in {"datawrite", "write", "写入"} or "write" in text or "写入" in value:
-        return "DataWrite"
-    if text in {"operationinvokedevent", "operationinvoked", "operationinvocated", "invokeoperation"}:
-        return "OperationInvokedEvent"
-    if text in {"calloperation", "servercallpoint"} or "call" in text or "调用" in value:
-        return "CallOperation"
-    return value
 
 
 def _normalize_base_type(value: str) -> str:
@@ -1176,9 +1122,10 @@ def _extract_record_elements(table: DocxTable) -> list[RecordElementContract]:
     rows = []
     for row in table.rows:
         record_type = _pick(row, "RecordTypeName", "RecordType", "结构体名")
-        element_name = _pick(row, "FieldName", "ElementName", "ElementPath", "字段名")
+        element_name = _pick(row, "ElementPath", "ElementName", "FieldName", "字段名")
         if not record_type or not element_name:
             continue
+        implementation_element_name = _pick(row, "FieldName", "ImplementationElementName") or element_name
         field_category = _normalize_value_type(_pick(row, "DataCategory", "FieldCategory", "数据类别", "字段类别"))
         internal_range = _pick(row, "InternalRange", "内部范围")
         enum_values = _normalize_enum_values(_pick(row, "EnumValues", "状态值表", "枚举值"))
@@ -1188,6 +1135,7 @@ def _extract_record_elements(table: DocxTable) -> list[RecordElementContract]:
                 implementation_record_type=_short_name(_pick(row, "ImplementationRecordType")),
                 field_order=_pick(row, "FieldOrder"),
                 element_name=_short_name(element_name),
+                implementation_element_name=_short_name(implementation_element_name),
                 field_category=field_category,
                 data_type=_short_name(_pick(row, "ApplicationDataType", "ApplicationFieldType", "DataType", "应用数据类型", "应用字段类型", "字段类型")),
                 implementation_field_type=_short_name(_pick(row, "InternalDataType", "ImplementationDataType", "ImplementationFieldType", "内部数据类型", "内部字段类型")),

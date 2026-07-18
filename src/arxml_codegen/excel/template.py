@@ -13,7 +13,7 @@ SHEETS: dict[str, list[str]] = {
     "ComponentPrototypes": ["CompositionName", "PrototypeName", "ComponentTypeName", "ComponentTypeRef", "Description"],
     "PrimitiveDataTypes": ["ApplicationTypeName", "ApplicationTypePath", "ImplementationTypeName", "ImplementationTypePath", "BaseType", "CompuMethodRef", "DataConstrRef", "CalibrationAccess", "UnitRef", "Description"],
     "RecordTypes": ["ApplicationTypeName", "ApplicationTypePath", "ImplementationTypeName", "ImplementationTypePath", "CalibrationAccess", "Description"],
-    "RecordElements": ["RecordTypeName", "ElementName", "ApplicationElementTypeRef", "ImplementationElementTypeRef", "Order", "Description"],
+    "RecordElements": ["RecordTypeName", "ElementName", "ApplicationElementTypeRef", "ImplementationElementTypeRef", "Order", "Description", "ImplementationElementName", "ElementCategory"],
     "PortRecordInitValues": ["ComponentName", "PortName", "RecordElementPath", "Value", "ValueType", "Description"],
     "DataTypeMappings": ["MappingSetPath", "ApplicationTypeRef", "ImplementationTypeRef", "Description"],
     "CompuMethods": ["CompuMethodName", "CompuMethodPath", "Category", "Description"],

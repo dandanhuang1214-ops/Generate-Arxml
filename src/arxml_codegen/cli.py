@@ -67,6 +67,7 @@ def main() -> int:
 
     print(f"\nCORE Validation ({len(RULES)} rule groups):")
     core_findings = run_core_validation(model)
+    core_errors = [f for f in core_findings if f.severity.value == "ERROR"]
     summary = summarize(core_findings)
     sev = summary["by_severity"]
     grp = summary["by_group"]
@@ -90,12 +91,12 @@ def main() -> int:
 
     if args.dry_run:
         print("Dry run enabled. No files written.")
-        return 1 if errors else 0
-    if errors:
-        print("ARXML generation skipped because validation failed.")
+        return 1 if errors or core_errors else 0
+    if errors or core_errors:
+        print("ARXML generation skipped because model or CORE validation failed.")
         return 1
 
-    write_outputs(model, config)
+    write_outputs(model, config, errors, core_findings)
     print("ARXML generation completed.")
     return 0
 

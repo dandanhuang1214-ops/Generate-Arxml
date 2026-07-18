@@ -2,6 +2,9 @@ from __future__ import annotations
 
 from collections import defaultdict
 from dataclasses import dataclass
+from datetime import datetime, timezone
+import hashlib
+import json
 from pathlib import Path
 from uuid import uuid4
 
@@ -57,12 +60,46 @@ def _resolve(base_dir: Path, value: str | Path) -> Path:
     return path if path.is_absolute() else (base_dir / path).resolve()
 
 
-def write_outputs(model: WorkbookV2Model, config: GeneratorConfig) -> None:
+def write_outputs(
+    model: WorkbookV2Model,
+    config: GeneratorConfig,
+    validation_errors: list[str] | None = None,
+    core_findings: list[object] | None = None,
+) -> None:
     write_arxml_v2(model, config.output)
-    _write_report(config.report, model, [])
+    _write_report(config.report, model, validation_errors or [], core_findings or [])
+    _write_manifest(config)
 
 
-def _write_report(path: Path, model: WorkbookV2Model, errors: list[str]) -> None:
+def _write_manifest(config: GeneratorConfig) -> None:
+    manifest_path = config.output.with_suffix(config.output.suffix + ".manifest.json")
+    payload = {
+        "generated_at_utc": datetime.now(timezone.utc).isoformat(),
+        "workbook": str(config.workbook),
+        "workbook_sha256": _sha256(config.workbook),
+        "arxml": str(config.output),
+        "arxml_sha256": _sha256(config.output),
+        "autosar_version": config.autosar_version,
+    }
+    manifest_path.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
+
+
+def _sha256(path: Path) -> str:
+    if not path.exists():
+        return ""
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _write_report(
+    path: Path,
+    model: WorkbookV2Model,
+    errors: list[str],
+    core_findings: list[object],
+) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     lines = [
         "# ARXML Generation Report",
@@ -87,7 +124,15 @@ def _write_report(path: Path, model: WorkbookV2Model, errors: list[str]) -> None
     if errors:
         lines.extend(f"- ERROR: {error}" for error in errors)
     else:
-        lines.append("- No validation errors.")
+        lines.append("- No model validation errors.")
+    if core_findings:
+        lines.extend(
+            f"- {getattr(finding, 'severity').value}: {getattr(finding, 'code')} "
+            f"{getattr(finding, 'message')}"
+            for finding in core_findings
+        )
+    else:
+        lines.append("- No CORE findings.")
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
@@ -434,8 +479,14 @@ def _write_application_types(packages: etree._Element, model: WorkbookV2Model) -
         for elem in sorted(elements_by_record.get(row.application_type_name, []), key=lambda item: int(item.order or 0)):
             app_elem = _el(rec_elems, "APPLICATION-RECORD-ELEMENT", uuid=_uuid())
             _el(app_elem, "SHORT-NAME", elem.element_name)
-            _el(app_elem, "CATEGORY", "VALUE")
-            _el(app_elem, "TYPE-TREF", elem.application_element_type_ref, DEST="APPLICATION-DATA-TYPE")
+            is_record = (elem.element_category or "").strip().lower() == "record"
+            _el(app_elem, "CATEGORY", "STRUCTURE" if is_record else "VALUE")
+            _el(
+                app_elem,
+                "TYPE-TREF",
+                elem.application_element_type_ref,
+                DEST="APPLICATION-RECORD-DATA-TYPE" if is_record else "APPLICATION-PRIMITIVE-DATA-TYPE",
+            )
 
 
 def _write_custom_implementation_types(packages: etree._Element, model: WorkbookV2Model) -> None:
@@ -450,7 +501,7 @@ def _write_custom_implementation_types(packages: etree._Element, model: Workbook
         subs = _el(impl, "SUB-ELEMENTS")
         for elem in sorted(elements_by_record.get(row.application_type_name, []), key=lambda item: int(item.order or 0)):
             sub = _el(subs, "IMPLEMENTATION-DATA-TYPE-ELEMENT", uuid=_uuid())
-            _el(sub, "SHORT-NAME", elem.element_name)
+            _el(sub, "SHORT-NAME", elem.implementation_element_name or elem.element_name)
             _el(sub, "CATEGORY", "TYPE_REFERENCE")
             props = _sw_props(sub)
             _el(props, "IMPLEMENTATION-DATA-TYPE-REF", elem.implementation_element_type_ref, DEST="IMPLEMENTATION-DATA-TYPE")
@@ -600,17 +651,6 @@ def _write_behavior(parent: etree._Element, comp, model: WorkbookV2Model, runnab
         _el(r, "SHORT-NAME", runnable.runnable_name)
         _el(r, "MINIMUM-START-INTERVAL", "0")
         _el(r, "CAN-BE-INVOKED-CONCURRENTLY", "false")
-        call_points = [a for a in accesses_by_runnable.get(runnable.runnable_name, []) if a.access_type == "ServerCallPoint"]
-        if call_points:
-            cps = _el(r, "SERVER-CALL-POINTS")
-            for call in call_points:
-                p = ports[call.port_name]
-                sc = _el(cps, "SYNCHRONOUS-SERVER-CALL-POINT", uuid=_uuid())
-                _el(sc, "SHORT-NAME", call.access_name or f"SC_{call.port_name}_{call.operation_name}")
-                iref = _el(sc, "OPERATION-IREF")
-                _el(iref, "CONTEXT-R-PORT-REF", f"{comp.package_path}/{comp.component_name}/{call.port_name}", DEST="R-PORT-PROTOTYPE")
-                _el(iref, "TARGET-REQUIRED-OPERATION-REF", f"{p.interface_ref}/{call.operation_name}", DEST="CLIENT-SERVER-OPERATION")
-                _el(sc, "TIMEOUT", "0")
         data_reads = [a for a in accesses_by_runnable.get(runnable.runnable_name, []) if a.access_type == "DataRead"]
         if data_reads:
             receive_points = _el(r, "DATA-RECEIVE-POINT-BY-ARGUMENTS")
@@ -635,6 +675,17 @@ def _write_behavior(parent: etree._Element, comp, model: WorkbookV2Model, runnab
                 iref = _el(accessed, "AUTOSAR-VARIABLE-IREF")
                 _el(iref, "PORT-PROTOTYPE-REF", f"{comp.package_path}/{comp.component_name}/{access.port_name}", DEST="P-PORT-PROTOTYPE")
                 _el(iref, "TARGET-DATA-PROTOTYPE-REF", f"{p.interface_ref}/{data_element}", DEST="VARIABLE-DATA-PROTOTYPE")
+        call_points = [a for a in accesses_by_runnable.get(runnable.runnable_name, []) if a.access_type == "ServerCallPoint"]
+        if call_points:
+            cps = _el(r, "SERVER-CALL-POINTS")
+            for call in call_points:
+                p = ports[call.port_name]
+                sc = _el(cps, "SYNCHRONOUS-SERVER-CALL-POINT", uuid=_uuid())
+                _el(sc, "SHORT-NAME", call.access_name or f"SC_{call.port_name}_{call.operation_name}")
+                iref = _el(sc, "OPERATION-IREF")
+                _el(iref, "CONTEXT-R-PORT-REF", f"{comp.package_path}/{comp.component_name}/{call.port_name}", DEST="R-PORT-PROTOTYPE")
+                _el(iref, "TARGET-REQUIRED-OPERATION-REF", f"{p.interface_ref}/{call.operation_name}", DEST="CLIENT-SERVER-OPERATION")
+                _el(sc, "TIMEOUT", "0")
         _el(r, "SYMBOL", runnable.symbol or runnable.runnable_name)
 
     for event in events:
@@ -794,14 +845,38 @@ def _record_init_value(parent: etree._Element, port, model: WorkbookV2Model) -> 
         if row.component_name == port.component_name and row.port_name == port.port_name
     ]
     record_type = _record_type_for_port(port, model)
-    order_by_element = {
-        row.element_name: int(row.order or 0)
-        for row in model.record_elements
-        if row.record_type_name == record_type
-    }
-    rows.sort(key=lambda row: order_by_element.get(row.record_element_path.split(".")[0], 9999))
-    for row in rows:
-        _field_value_spec(fields, row.record_element_path, row.value, row.value_type)
+    _write_record_fields(fields, rows, model, record_type)
+
+
+def _write_record_fields(
+    parent: etree._Element,
+    rows: list,
+    model: WorkbookV2Model,
+    record_type: str,
+    prefix: str = "",
+) -> None:
+    elements = sorted(
+        (row for row in model.record_elements if row.record_type_name == record_type),
+        key=lambda row: int(row.order or 0),
+    )
+    for element in elements:
+        path = f"{prefix}.{element.element_name}" if prefix else element.element_name
+        exact = next((row for row in rows if row.record_element_path == path), None)
+        descendants = [row for row in rows if row.record_element_path.startswith(path + ".")]
+        is_record = (element.element_category or "").strip().lower() == "record"
+        if is_record and descendants:
+            nested = _el(parent, "RECORD-VALUE-SPECIFICATION")
+            _el(nested, "SHORT-LABEL", element.element_name)
+            nested_fields = _el(nested, "FIELDS")
+            _write_record_fields(
+                nested_fields,
+                rows,
+                model,
+                _short(element.application_element_type_ref),
+                path,
+            )
+        elif exact is not None:
+            _field_value_spec(parent, element.element_name, exact.value, exact.value_type)
 
 
 def _field_value_spec(parent: etree._Element, label: str, value: str, value_type: str) -> None:

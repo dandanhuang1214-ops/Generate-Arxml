@@ -1,9 +1,12 @@
+import arxml_codegen.cli as cli_module
 from arxml_codegen.cli import build_parser
 from arxml_codegen.excel.template import create_template_v2
 from arxml_codegen.excel.reader import load_workbook_v2
 from arxml_codegen.generator.arxml_writer import (
+    GeneratorConfig,
     build_arxml_v2,
     validate_model_v2,
+    write_outputs,
 )
 from arxml_codegen.models.schema import (
     CompuMethodRow,
@@ -21,6 +24,7 @@ from arxml_codegen.models.schema import (
     PrimitiveDataTypeRow,
     RecordElementRow,
     RecordTypeRow,
+    RunnableAccessRow,
     RunnableV2Row,
     SRDataElementRow,
     SRInterfaceRow,
@@ -80,6 +84,48 @@ def test_parser_defaults() -> None:
     assert args.create_template is None
 
 
+def test_cli_blocks_generation_when_core_validation_has_errors(monkeypatch, tmp_path) -> None:
+    model = _base_model()
+    model.ports[0].init_value = "not-a-number"
+    model.ports[0].init_value_type = "Numeric"
+    config = GeneratorConfig(
+        workbook=tmp_path / "input.xlsx",
+        output=tmp_path / "output.arxml",
+        report=tmp_path / "report.md",
+        matlab_init=None,
+    )
+    generated = False
+
+    def mark_generated(*args, **kwargs) -> None:
+        nonlocal generated
+        generated = True
+
+    monkeypatch.setattr(cli_module, "load_config", lambda path: config)
+    monkeypatch.setattr(cli_module, "load_workbook_v2", lambda path: model)
+    monkeypatch.setattr(cli_module, "write_outputs", mark_generated)
+    monkeypatch.setattr("sys.argv", ["arxml-codegen"])
+
+    assert cli_module.main() == 1
+    assert generated is False
+
+
+def test_generation_report_contains_core_findings(tmp_path) -> None:
+    model = _base_model()
+    findings = run_core_validation(model)
+    config = GeneratorConfig(
+        workbook=tmp_path / "input.xlsx",
+        output=tmp_path / "output.arxml",
+        report=tmp_path / "report.md",
+        matlab_init=None,
+    )
+
+    write_outputs(model, config, [], findings)
+    report = config.report.read_text(encoding="utf-8")
+
+    assert "CORE-" in report
+    assert config.output.with_suffix(".arxml.manifest.json").exists()
+
+
 def test_linear_compu_method_writes_limits_and_unit_ref() -> None:
     model = _base_model()
     model.primitive_data_types[0].application_type_name = "App_DutyRat"
@@ -114,6 +160,64 @@ def test_linear_compu_method_writes_limits_and_unit_ref() -> None:
     assert "<UNIT-REF DEST=\"UNIT\">/DataTypes/Units/No_Unit</UNIT-REF>" in xml_text
     assert "<LOWER-LIMIT INTERVAL-TYPE=\"CLOSED\">0</LOWER-LIMIT>" in xml_text
     assert "<UPPER-LIMIT INTERVAL-TYPE=\"CLOSED\">100</UPPER-LIMIT>" in xml_text
+
+
+def test_runnable_accesses_match_davinci_child_order() -> None:
+    model = _base_model()
+    model.ports.append(
+        PortV2Row(
+            "Ports",
+            4,
+            "Enh",
+            "pBool",
+            "P",
+            "SR",
+            "/Interfaces/If_Bool_SR",
+            "ntfBool",
+            "",
+            "",
+            "",
+            "",
+            "",
+            "",
+            "",
+        )
+    )
+    model.ports.append(
+        PortV2Row(
+            "Ports",
+            5,
+            "Enh",
+            "rCmd",
+            "R",
+            "CS",
+            "/Interfaces/If_Cmd_CS",
+            "",
+            "rrCmd",
+            "CLIENT-COM-SPEC",
+            "",
+            "",
+            "",
+            "",
+            "",
+        )
+    )
+    model.runnables[0].runnable_name = "Enh_Step"
+    model.runnables[0].symbol = "Enh_Step"
+    model.runnable_accesses = [
+        RunnableAccessRow("RunnableAccesses", 2, "Enh", "Enh_Step", "DataRead", "rBool", "ntfBool", "", ""),
+        RunnableAccessRow("RunnableAccesses", 3, "Enh", "Enh_Step", "DataWrite", "pBool", "ntfBool", "", ""),
+        RunnableAccessRow("RunnableAccesses", 4, "Enh", "Enh_Step", "ServerCallPoint", "rCmd", "", "rrCmd", ""),
+    ]
+
+    xml_text = etree_to_text(build_arxml_v2(model))
+    runnable_text = xml_text[
+        xml_text.index("<SHORT-NAME>Enh_Step</SHORT-NAME>") : xml_text.index("</RUNNABLE-ENTITY>", xml_text.index("<SHORT-NAME>Enh_Step</SHORT-NAME>"))
+    ]
+
+    assert runnable_text.index("<DATA-RECEIVE-POINT-BY-ARGUMENTS>") < runnable_text.index("<DATA-SEND-POINTS>")
+    assert runnable_text.index("<DATA-SEND-POINTS>") < runnable_text.index("<SERVER-CALL-POINTS>")
+    assert runnable_text.index("<SERVER-CALL-POINTS>") < runnable_text.index("<SYMBOL>Enh_Step</SYMBOL>")
 
 
 def test_template_validations_are_present(tmp_path) -> None:
@@ -261,6 +365,24 @@ def test_core_reports_enum_init_value_numeric_literal() -> None:
     assert any(finding.code == "CORE-010-INIT-VALUE-TYPE-MISMATCH" for finding in findings)
 
 
+def test_core_reports_application_type_declared_as_primitive_and_record() -> None:
+    model = _base_model()
+    model.record_types = [
+        RecordTypeRow(
+            "RecordTypes",
+            2,
+            "App_Bool",
+            "/DataTypes/App_Bool",
+            "Impl_Bool",
+            "/DataTypes/Impl_Bool",
+        ),
+    ]
+
+    codes = {finding.code for finding in run_core_validation(model)}
+
+    assert "CORE-010-DATATYPE-KIND-CONFLICT" in codes
+
+
 def test_record_init_value_writes_record_value_specification() -> None:
     model = _base_model()
     model.record_types = [
@@ -283,6 +405,62 @@ def test_record_init_value_writes_record_value_specification() -> None:
     assert "RECORD-VALUE-SPECIFICATION" in xml_text
     assert "FieldA" in xml_text
     assert "FieldB" in xml_text
+
+
+def test_nested_record_init_value_writes_recursive_record_specification() -> None:
+    model = _base_model()
+    model.record_types = [
+        RecordTypeRow("RecordTypes", 2, "App_Outer", "/DataTypes/App_Outer", "Impl_Outer", "/DataTypes/Impl_Outer"),
+        RecordTypeRow("RecordTypes", 3, "App_Inner", "/DataTypes/App_Inner", "Impl_Inner", "/DataTypes/Impl_Inner"),
+    ]
+    model.record_elements = [
+        RecordElementRow(
+            "RecordElements",
+            2,
+            "App_Outer",
+            "Nested",
+            "/DataTypes/App_Inner",
+            "/DataTypes/Impl_Inner",
+            "1",
+            "NestedImpl",
+            "Record",
+        ),
+        RecordElementRow(
+            "RecordElements",
+            3,
+            "App_Inner",
+            "Value",
+            "/DataTypes/App_Bool",
+            "/Platform/uint8",
+            "1",
+            "RawValue",
+            "Value",
+        ),
+    ]
+    model.sr_data_elements[0].application_type_ref = "/DataTypes/App_Outer"
+    model.ports[0].init_value_type = "Record"
+    model.port_record_init_values = [
+        PortRecordInitValueRow(
+            "PortRecordInitValues",
+            2,
+            "Atm",
+            "pBool",
+            "Nested.Value",
+            "1",
+            "Boolean",
+        ),
+    ]
+
+    xml_text = etree_to_text(build_arxml_v2(model))
+    findings = run_core_validation(model)
+
+    assert xml_text.count("<RECORD-VALUE-SPECIFICATION>") == 2
+    assert "<SHORT-LABEL>Nested</SHORT-LABEL>" in xml_text
+    assert "<SHORT-LABEL>Value</SHORT-LABEL>" in xml_text
+    assert not any(
+        finding.code == "CORE-010-INIT-VALUE-RECORD-INCOMPLETE"
+        for finding in findings
+    )
 
 
 def test_core_reports_incomplete_record_init_value() -> None:
@@ -319,6 +497,84 @@ def test_core_reports_compu_scale_gap_and_overlap() -> None:
 
     assert "CORE-010-COMPU-SCALE-GAP" in codes
     assert "CORE-010-COMPU-SCALE-OVERLAP" in codes
+
+
+def test_core_reports_unknown_local_compu_method_reference() -> None:
+    model = WorkbookV2Model(
+        primitive_data_types=[
+            PrimitiveDataTypeRow(
+                "PrimitiveDataTypes",
+                2,
+                "App_uint16",
+                "/DataTypes/App_uint16",
+                "uint16",
+                "/AUTOSAR_Platform/ImplementationDataTypes/uint16",
+                "uint16",
+                "/DataTypes/CompuMethods/CM_App_uint16_Identical",
+                "/AUTOSAR_Platform/DataConstrs/uint16_DataConstr",
+                "READ-ONLY",
+            )
+        ]
+    )
+
+    codes = {finding.code for finding in run_core_validation(model)}
+
+    assert "CORE-010-COMPU-METHOD-REF-UNKNOWN" in codes
+
+
+def test_core_reports_linear_physical_range_inconsistency() -> None:
+    model = WorkbookV2Model(
+        primitive_data_types=[
+            PrimitiveDataTypeRow(
+                "PrimitiveDataTypes",
+                2,
+                "App_DutyRat",
+                "/DataTypes/App_DutyRat",
+                "uint8",
+                "/AUTOSAR_Platform/ImplementationDataTypes/uint8",
+                "uint8",
+                "/DataTypes/CompuMethods/CM_App_DutyRat_Linear",
+                "/DataTypes/DataConstrs/DC_App_DutyRat",
+                "READ-ONLY",
+            )
+        ],
+        compu_methods=[
+            CompuMethodRow(
+                "CompuMethods",
+                2,
+                "CM_App_DutyRat_Linear",
+                "/DataTypes/CompuMethods/CM_App_DutyRat_Linear",
+                "LINEAR",
+            )
+        ],
+        compu_scales=[
+            CompuScaleRow(
+                "CompuScales",
+                2,
+                "CM_App_DutyRat_Linear",
+                "0",
+                "100",
+                "",
+                "0.1",
+                "1",
+                "0",
+            )
+        ],
+        data_constrs=[
+            DataConstrRow(
+                "DataConstrs",
+                2,
+                "DC_App_DutyRat",
+                "/DataTypes/DataConstrs/DC_App_DutyRat",
+                "0",
+                "255",
+            )
+        ],
+    )
+
+    codes = {finding.code for finding in run_core_validation(model)}
+
+    assert "CORE-010-PHYS-RANGE-CONSISTENCY" in codes
 
 
 def test_core_reports_dataconstr_not_covered_by_compu_scales() -> None:

@@ -94,6 +94,26 @@ def check_duplicate_names(model: WorkbookModel) -> list[Finding]:
                 ))
             else:
                 seen[key] = row
+
+    primitive_paths = {
+        row.application_type_path or row.application_type_name: row
+        for row in model.primitive_data_types
+        if row.application_type_path or row.application_type_name
+    }
+    for row in model.record_types:
+        key = row.application_type_path or row.application_type_name
+        if not key or key not in primitive_paths:
+            continue
+        loc = f"{row.source_sheet}!R{row.row_index}" if row.source_sheet else ""
+        findings.append(Finding(
+            code="CORE-010-DATATYPE-KIND-CONFLICT",
+            severity=Severity.ERROR,
+            message=(
+                f"Application data type '{key}' is declared as both Primitive and Record."
+            ),
+            location=loc,
+            suggestion="Keep exactly one ADT category and define Record fields only for Record types.",
+        ))
     return findings
 
 
@@ -161,6 +181,43 @@ def check_compu_method_values(model: WorkbookModel) -> list[Finding]:
     return findings
 
 
+def check_datatype_reference_integrity(model: WorkbookModel) -> list[Finding]:
+    """CORE-010: Locally-owned CompuMethod/DataConstr refs must resolve."""
+    findings = []
+    compu_paths = {row.compu_method_path for row in model.compu_methods if row.compu_method_path}
+    constr_paths = {row.data_constr_path for row in model.data_constrs if row.data_constr_path}
+
+    for row in model.primitive_data_types:
+        loc = f"{row.source_sheet}!R{row.row_index}" if row.source_sheet else ""
+        if (
+            row.compu_method_ref
+            and not row.compu_method_ref.startswith("/AUTOSAR_Platform/")
+            and row.compu_method_ref not in compu_paths
+        ):
+            findings.append(Finding(
+                "CORE-010-COMPU-METHOD-REF-UNKNOWN",
+                Severity.ERROR,
+                f"ADT '{row.application_type_name}' references undefined CompuMethod "
+                f"'{row.compu_method_ref}'.",
+                loc,
+                suggestion="Add the referenced CompuMethod row or correct CompuMethodRef.",
+            ))
+        if (
+            row.data_constr_ref
+            and not row.data_constr_ref.startswith("/AUTOSAR_Platform/")
+            and row.data_constr_ref not in constr_paths
+        ):
+            findings.append(Finding(
+                "CORE-010-DATACONSTR-REF-UNKNOWN",
+                Severity.ERROR,
+                f"ADT '{row.application_type_name}' references undefined DataConstr "
+                f"'{row.data_constr_ref}'.",
+                loc,
+                suggestion="Add the referenced DataConstr row or correct DataConstrRef.",
+            ))
+    return findings
+
+
 def check_compu_scale_ranges(model: WorkbookModel) -> list[Finding]:
     """CORE-010-COMPU-SCALE-GAP: Detect numeric CompuScale gaps and overlaps."""
     findings = []
@@ -214,6 +271,68 @@ def check_compu_scale_ranges(model: WorkbookModel) -> list[Finding]:
                 ))
             if upper > previous_upper:
                 previous_lower, previous_upper, previous_scale = lower, upper, scale
+    return findings
+
+
+def check_linear_physical_range_consistency(model: WorkbookModel) -> list[Finding]:
+    """CORE-010-PHYS-RANGE-CONSISTENCY: LINEAR conversion must match declared physical limits."""
+    findings = []
+    compu_by_path = {row.compu_method_path: row for row in model.compu_methods if row.compu_method_path}
+    constr_by_path = {row.data_constr_path: row for row in model.data_constrs if row.data_constr_path}
+    scales_by_method = defaultdict(list)
+    for scale in model.compu_scales:
+        scales_by_method[scale.compu_method_name].append(scale)
+
+    for data_type in model.primitive_data_types:
+        compu = compu_by_path.get(data_type.compu_method_ref)
+        constr = constr_by_path.get(data_type.data_constr_ref)
+        if not compu or not constr or (compu.category or "").strip().upper() != "LINEAR":
+            continue
+        scales = scales_by_method.get(compu.compu_method_name, [])
+        if not scales:
+            continue
+        scale = scales[0]
+        internal_lower = _to_float(constr.lower_limit)
+        internal_upper = _to_float(constr.upper_limit)
+        physical_lower = _to_float(scale.lower_limit)
+        physical_upper = _to_float(scale.upper_limit)
+        numerator = _to_float(scale.numerator or "1")
+        denominator = _to_float(scale.denominator or "1")
+        offset = _to_float(scale.offset or "0")
+        if None in {
+            internal_lower,
+            internal_upper,
+            physical_lower,
+            physical_upper,
+            numerator,
+            denominator,
+            offset,
+        } or denominator == 0:
+            continue
+
+        mapped = sorted(
+            (
+                offset + numerator * internal_lower / denominator,
+                offset + numerator * internal_upper / denominator,
+            )
+        )
+        expected = sorted((physical_lower, physical_upper))
+        tolerance = max(1e-9, abs(expected[1] - expected[0]) * 1e-6)
+        if (
+            abs(mapped[0] - expected[0]) > tolerance
+            or abs(mapped[1] - expected[1]) > tolerance
+        ):
+            loc = f"{data_type.source_sheet}!R{data_type.row_index}" if data_type.source_sheet else ""
+            findings.append(Finding(
+                "CORE-010-PHYS-RANGE-CONSISTENCY",
+                Severity.WARNING,
+                f"ADT '{data_type.application_type_name}' internal range "
+                f"{internal_lower:g}..{internal_upper:g} maps to "
+                f"{mapped[0]:g}..{mapped[1]:g}, but its LINEAR CompuScale declares "
+                f"physical range {expected[0]:g}..{expected[1]:g}.",
+                loc,
+                suggestion="Correct InternalRange, PhysicalRange, Resolution, or Offset in the delivery document.",
+            ))
     return findings
 
 
@@ -315,6 +434,90 @@ def check_datatype_mapping_completeness(model: WorkbookModel) -> list[Finding]:
                 f"{sheet}!R{row_index}" if sheet else "",
                 suggestion="Add a DataTypeMappings row for this ApplicationTypeRef.",
             ))
+    return findings
+
+
+def check_record_structure(model: WorkbookModel) -> list[Finding]:
+    """Validate application/implementation field names and nested Record references."""
+    findings: list[Finding] = []
+    record_by_name = {row.application_type_name: row for row in model.record_types}
+    record_paths = {row.application_type_path for row in model.record_types}
+    implementation_paths = {row.implementation_type_path for row in model.record_types}
+    app_names: set[tuple[str, str]] = set()
+    impl_names: set[tuple[str, str]] = set()
+    graph: dict[str, set[str]] = defaultdict(set)
+
+    for element in model.record_elements:
+        loc = f"{element.source_sheet}!R{element.row_index}" if element.source_sheet else ""
+        app_key = (element.record_type_name, element.element_name)
+        if app_key in app_names:
+            findings.append(Finding(
+                "CORE-010-RECORD-ELEMENT-DUPLICATE",
+                Severity.ERROR,
+                f"Record '{element.record_type_name}' contains duplicate application element '{element.element_name}'.",
+                loc,
+            ))
+        app_names.add(app_key)
+
+        parent = record_by_name.get(element.record_type_name)
+        impl_name = element.implementation_element_name or element.element_name
+        impl_parent = parent.implementation_type_name if parent else element.record_type_name
+        impl_key = (impl_parent, impl_name)
+        if impl_key in impl_names:
+            findings.append(Finding(
+                "CORE-010-RECORD-IMPLEMENTATION-ELEMENT-DUPLICATE",
+                Severity.ERROR,
+                f"Implementation Record '{impl_parent}' contains duplicate element '{impl_name}'.",
+                loc,
+            ))
+        impl_names.add(impl_key)
+
+        if (element.element_category or "").strip().lower() != "record":
+            continue
+        if element.application_element_type_ref not in record_paths:
+            findings.append(Finding(
+                "CORE-010-NESTED-RECORD-REF-UNKNOWN",
+                Severity.ERROR,
+                f"Nested element '{element.record_type_name}.{element.element_name}' references unknown Application Record '{element.application_element_type_ref}'.",
+                loc,
+            ))
+        if element.implementation_element_type_ref not in implementation_paths:
+            findings.append(Finding(
+                "CORE-010-NESTED-RECORD-IMPL-REF-UNKNOWN",
+                Severity.ERROR,
+                f"Nested element '{element.record_type_name}.{impl_name}' references unknown Implementation Record '{element.implementation_element_type_ref}'.",
+                loc,
+            ))
+        child = next(
+            (row.application_type_name for row in model.record_types if row.application_type_path == element.application_element_type_ref),
+            "",
+        )
+        if child:
+            graph[element.record_type_name].add(child)
+
+    visiting: set[str] = set()
+    visited: set[str] = set()
+
+    def visit(record_name: str, trail: list[str]) -> None:
+        if record_name in visiting:
+            cycle = trail[trail.index(record_name):] + [record_name]
+            findings.append(Finding(
+                "CORE-010-NESTED-RECORD-CYCLE",
+                Severity.ERROR,
+                f"Nested Record cycle detected: {' -> '.join(cycle)}.",
+                "RecordElements",
+            ))
+            return
+        if record_name in visited:
+            return
+        visiting.add(record_name)
+        for child_name in sorted(graph.get(record_name, set())):
+            visit(child_name, trail + [child_name])
+        visiting.remove(record_name)
+        visited.add(record_name)
+
+    for record_name in sorted(graph):
+        visit(record_name, [record_name])
     return findings
 
 
@@ -425,12 +628,8 @@ def check_init_value_types(model: WorkbookModel) -> list[Finding]:
                 ))
                 continue
             record_type = _record_type_for_port(port, model)
-            expected = {
-                row.element_name
-                for row in model.record_elements
-                if row.record_type_name == record_type
-            }
-            actual = {row.record_element_path.split(".")[0] for row in rows if row.record_element_path}
+            expected = _record_leaf_paths(model, record_type)
+            actual = {row.record_element_path for row in rows if row.record_element_path}
             missing = sorted(expected - actual)
             if missing:
                 findings.append(Finding(
@@ -441,6 +640,34 @@ def check_init_value_types(model: WorkbookModel) -> list[Finding]:
                     suggestion="Add missing PortRecordInitValues rows.",
                 ))
     return findings
+
+
+def _record_leaf_paths(
+    model: WorkbookModel,
+    record_type: str,
+    prefix: str = "",
+    visiting: frozenset[str] = frozenset(),
+) -> set[str]:
+    if record_type in visiting:
+        return set()
+    paths: set[str] = set()
+    next_visiting = visiting | {record_type}
+    for element in model.record_elements:
+        if element.record_type_name != record_type:
+            continue
+        path = f"{prefix}.{element.element_name}" if prefix else element.element_name
+        if (element.element_category or "").strip().lower() == "record":
+            paths.update(
+                _record_leaf_paths(
+                    model,
+                    _short_ref(element.application_element_type_ref),
+                    path,
+                    next_visiting,
+                )
+            )
+        else:
+            paths.add(path)
+    return paths
 
 
 def _to_float(value: str) -> float | None:

@@ -104,7 +104,17 @@ def load_workbook_v2(path: Path) -> WorkbookV2Model:
 
     for sheet, row_index, header, row in _rows(workbook, "RecordElements") or []:
         model.record_elements.append(
-            RecordElementRow(sheet, row_index, _cell(row, header, "RecordTypeName"), _cell(row, header, "ElementName"), _cell(row, header, "ApplicationElementTypeRef"), _cell(row, header, "ImplementationElementTypeRef"), _cell(row, header, "Order"))
+            RecordElementRow(
+                sheet,
+                row_index,
+                _cell(row, header, "RecordTypeName"),
+                _cell(row, header, "ElementName"),
+                _cell(row, header, "ApplicationElementTypeRef"),
+                _cell(row, header, "ImplementationElementTypeRef"),
+                _cell(row, header, "Order"),
+                _cell(row, header, "ImplementationElementName"),
+                _cell(row, header, "ElementCategory"),
+            )
         )
 
     for sheet, row_index, header, row in _rows(workbook, "PortRecordInitValues") or []:

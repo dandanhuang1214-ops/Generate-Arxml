@@ -2,9 +2,20 @@ from __future__ import annotations
 
 import zipfile
 
-from arxml_codegen.contract.docx_loader import extract_contract_from_docx
+from arxml_codegen.contract.docx_loader import _add_gap_issues, extract_contract_from_docx
 from arxml_codegen.contract.excel_builder import build_workbook_rows, write_contract_excel
 from arxml_codegen.contract.gap_report import build_gap_report, gap_report_markdown
+from arxml_codegen.contract.schema import (
+    DeliveryContract,
+    DataTypeContract,
+    OperationArgumentContract,
+    ProjectContract,
+    RecordElementContract,
+    RunnableContract,
+    ServiceContract,
+    SignalContract,
+    SwcContract,
+)
 from arxml_codegen.excel.reader import load_workbook_v2
 from arxml_codegen.generator.arxml_writer import validate_model_v2
 from arxml_codegen.validator.engine import run_all as run_core_validation
@@ -395,6 +406,265 @@ def test_soa_profile_reports_missing_sr_signal_from_access_table(tmp_path) -> No
     assert "未定义的 S/R 信号" in markdown
 
 
+def test_mixed_profile_reuses_davinci_signal_type_and_access_rules(tmp_path) -> None:
+    docx = tmp_path / "mixed_signal_soa.docx"
+    _write_minimal_docx(
+        docx,
+        [
+            ("Mixed CP delivery", None),
+            (
+                "Project",
+                [
+                    ["字段", "填写值", "说明"],
+                    ["项目/系统名称", "ALM", ""],
+                    ["目标 AUTOSAR 版本", "4-3-0", ""],
+                    ["生成模式", "mixed_signal_soa", ""],
+                    ["RootPackage", "DaVinci 默认路径", ""],
+                ],
+            ),
+            (
+                "SWCs",
+                [
+                    ["SWCName", "PrototypeName", "SWCType", "IsComposition", "Description"],
+                    ["ALM_Enh", "Inst_Enh", "Atomic", "false", "enh"],
+                    ["ALM_Atm", "Inst_Atm", "Atomic", "false", "atm"],
+                    ["ALM_Composition", "ALM_Composition", "Composition", "true", "composition"],
+                ],
+            ),
+            (
+                "Signals",
+                [
+                    [
+                        "SignalName", "ValueType", "ApplicationDataType", "InternalDataType",
+                        "InternalRange", "PhysicalRange", "Resolution", "Offset", "Unit",
+                        "EnumValues", "InitValue", "Description",
+                    ],
+                    ["ntfTrkDutyRat", "Value", "App_DutyRat", "uint8", "0-255", "0-100", "0.1", "0", "%", "", "0", "duty"],
+                    ["vbTrkSleepPermit", "Boolean", "App_boolean", "boolean", "0-1", "0-1", "", "", "No_Unit", "", "0", "sleep"],
+                    ["ntfStatus", "Record", "App_Status", "Impl_Status", "", "", "", "", "", "", "", "status"],
+                ],
+            ),
+            (
+                "Record",
+                [
+                    [
+                        "RecordTypeName", "ImplementationRecordType", "FieldOrder", "FieldName",
+                        "DataCategory", "ApplicationDataType", "InternalDataType", "InternalRange",
+                        "PhysicalRange", "Resolution", "Offset", "Unit", "EnumValues", "InitValue",
+                    ],
+                    ["App_Status", "Impl_Status", "1", "CallId", "Value", "App_uint16", "uint16", "0-65535", "0-65535", "", "", "No_Unit", "", "0"],
+                ],
+            ),
+            (
+                "Runnable Overview",
+                [
+                    ["SWC", "RunnableName", "TriggerType", "PeriodMs", "Description"],
+                    ["ALM_Enh", "ALM_Enh_Step", "Periodic", "10", "step"],
+                    ["ALM_Atm", "rrTrkCtrl_Atm_rrTrkCtrl", "OperationInvocation", "", "server"],
+                ],
+            ),
+            (
+                "Runnable Access",
+                [
+                    ["SWC", "RunnableName", "AccessType", "PortOrSignal", "OperationName", "Description"],
+                    ["ALM_Enh", "ALM_Enh_Step", "DataRead", "ntfTrkDutyRat", "", "read duty"],
+                    ["ALM_Atm", "rrTrkCtrl_Atm_rrTrkCtrl", "DataRead", "vbTrkSleepPermit", "", "read sleep"],
+                ],
+            ),
+        ],
+    )
+
+    contract = extract_contract_from_docx(docx, mode="soa")
+    rows = build_workbook_rows(contract)
+
+    assert contract.project.system_name == "ALM"
+    assert contract.project.generation_profile == "mixed_signal_soa"
+    assert contract.project.root_package == "/ComponentTypes"
+    assert not contract.open_issues
+    assert {row["InterfaceName"] for row in rows["SRInterfaces"]} == {
+        "ntfTrkDutyRat", "vbTrkSleepPermit", "ntfStatus",
+    }
+    assert {
+        (row["InterfaceName"], row["DataElementName"])
+        for row in rows["SRDataElements"]
+    } == {
+        ("ntfTrkDutyRat", "ntfTrkDutyRat"),
+        ("vbTrkSleepPermit", "vbTrkSleepPermit"),
+        ("ntfStatus", "ntfStatus"),
+    }
+    assert {
+        (row["ComponentName"], row["PortName"], row["PortDirection"])
+        for row in rows["Ports"] if row["InterfaceKind"] == "SR"
+    } == {
+        ("ALM_Enh", "ntfTrkDutyRat", "R"),
+        ("ALM_Atm", "vbTrkSleepPermit", "R"),
+    }
+    assert not any(
+        row["PortName"].startswith(("Rp_", "Pp_"))
+        for row in rows["Ports"] if row["InterfaceKind"] == "SR"
+    )
+
+    primitive_names = {row["ApplicationTypeName"] for row in rows["PrimitiveDataTypes"]}
+    assert "App_Status" not in primitive_names
+    status = next(row for row in rows["RecordTypes"] if row["ApplicationTypeName"] == "App_Status")
+    assert status["ImplementationTypeName"] == "Impl_Status"
+    boolean = next(row for row in rows["PrimitiveDataTypes"] if row["ApplicationTypeName"] == "App_boolean")
+    assert boolean["CompuMethodRef"] == "/AUTOSAR_Platform/CompuMethods/boolean_CompuMethod"
+    uint16 = next(row for row in rows["PrimitiveDataTypes"] if row["ApplicationTypeName"] == "App_uint16")
+    assert uint16["CompuMethodRef"] == "/DataTypes/CompuMethods/CM_App_uint16_Identical"
+    assert any(
+        row["CompuMethodPath"] == "/DataTypes/CompuMethods/CM_App_uint16_Identical"
+        for row in rows["CompuMethods"]
+    )
+    duty = next(row for row in rows["PrimitiveDataTypes"] if row["ApplicationTypeName"] == "App_DutyRat")
+    assert duty["CompuMethodRef"] == "/DataTypes/CompuMethods/CM_App_DutyRat_Linear"
+    assert duty["UnitRef"] == ""
+    assert {row["UnitPath"] for row in rows["Units"]} == {"/DataTypes/Units/No_Unit"}
+    assert {
+        "CompuMethodName": "CM_App_DutyRat_Linear",
+        "LowerLimit": "0",
+        "UpperLimit": "100",
+        "Numerator": "0.1",
+        "Denominator": "1",
+        "Offset": "0",
+    } in rows["CompuScales"]
+    assert {
+        (row["ComponentName"], row["RunnableName"], row["PortName"], row["DataElementName"])
+        for row in rows["RunnableAccesses"] if row["AccessType"] == "DataRead"
+    } == {
+        ("ALM_Enh", "ALM_Enh_Step", "ntfTrkDutyRat", "ntfTrkDutyRat"),
+        ("ALM_Atm", "rrTrkCtrl_Atm_rrTrkCtrl", "vbTrkSleepPermit", "vbTrkSleepPermit"),
+    }
+
+
+def test_mixed_profile_uses_cs_port_role_not_name_prefix() -> None:
+    contract = DeliveryContract(
+        project=ProjectContract(
+            system_name="RoleTest",
+            generation_profile="mixed_signal_soa",
+        ),
+        swcs=[
+            SwcContract(name="ClientSwc", kind="Application"),
+            SwcContract(name="Composition_RoleTest", kind="Composition"),
+        ],
+        services=[
+            ServiceContract(
+                service_name="RunService",
+                owner_swc="ClientSwc",
+                client_swc="ClientSwc",
+                interface_name="RunService",
+                port_name="ClientCall",
+                operation_name="RunService",
+                port_role="Client",
+            )
+        ],
+        runnables=[
+            RunnableContract(
+                swc="ClientSwc",
+                runnable_name="ClientSwc_Step",
+                trigger_type="Periodic",
+                period_ms="10",
+            ),
+            RunnableContract(
+                swc="ClientSwc",
+                runnable_name="ClientSwc_Step",
+                related_port_or_signal="ClientCall",
+                related_operation="RunService",
+            ),
+        ],
+    )
+
+    rows = build_workbook_rows(contract)
+
+    assert {
+        (row["AccessType"], row["PortName"], row["OperationName"])
+        for row in rows["RunnableAccesses"]
+    } == {("ServerCallPoint", "ClientCall", "RunService")}
+
+
+def test_operation_argument_keeps_explicit_interface_name() -> None:
+    contract = DeliveryContract(
+        project=ProjectContract(
+            system_name="OperationTest",
+            generation_profile="mixed_signal_soa",
+        ),
+        services=[
+            ServiceContract(service_name="A", interface_name="IfA", operation_name="Run"),
+            ServiceContract(service_name="B", interface_name="IfB", operation_name="Run"),
+        ],
+        operation_args=[
+            OperationArgumentContract(
+                interface_name="IfB",
+                operation_name="Run",
+                argument_name="Value",
+                direction="IN",
+                value_type="Value",
+                data_type="App_uint8",
+                internal_data_type="uint8",
+            )
+        ],
+    )
+
+    rows = build_workbook_rows(contract)
+
+    assert rows["CSArguments"][0]["InterfaceName"] == "IfB"
+
+
+def test_contract_report_flags_multi_operation_port_and_adt_conflict() -> None:
+    contract = DeliveryContract(
+        project=ProjectContract(
+            system_name="ReportTest",
+            generation_profile="mixed_signal_soa",
+        ),
+        services=[
+            ServiceContract(
+                service_name="Service",
+                owner_swc="Server",
+                interface_name="Service",
+                port_name="ServicePort",
+                operation_name="OpA",
+                port_role="Server",
+            ),
+            ServiceContract(
+                service_name="Service",
+                owner_swc="Server",
+                interface_name="Service",
+                port_name="ServicePort",
+                operation_name="OpB",
+                port_role="Server",
+            ),
+        ],
+        signals=[
+            SignalContract(
+                signal_name="SigA",
+                value_type="Value",
+                data_type="App_X",
+                internal_data_type="uint8",
+                init_value="0",
+            ),
+            SignalContract(
+                signal_name="SigB",
+                value_type="Record",
+                data_type="App_X",
+                internal_data_type="Impl_X",
+            ),
+        ],
+        data_types=[
+            DataTypeContract(
+                type_name="App_X",
+                type_kind="Value",
+                base_type="uint8",
+            )
+        ],
+    )
+
+    _add_gap_issues(contract)
+    fields = {issue.field for issue in contract.open_issues}
+
+    assert "services.Server.ServicePort.operations" in fields
+    assert "data_types.App_X.conflict" in fields
+
+
 def test_signal_atomic_profile_uses_record_init_values_for_record_ports(tmp_path) -> None:
     docx = tmp_path / "record_init.docx"
     _write_minimal_docx(
@@ -440,6 +710,63 @@ def test_signal_atomic_profile_uses_record_init_values_for_record_ports(tmp_path
         "ValueType": "Enum",
         "Description": "Init for App_WinCtrl.Cmd",
     } in rows["PortRecordInitValues"]
+
+
+def test_mixed_profile_preserves_nested_record_application_and_implementation_names(tmp_path) -> None:
+    contract = DeliveryContract(
+        project=ProjectContract(generation_profile="mixed_signal_soa"),
+        record_elements=[
+            RecordElementContract(
+                record_type="App_Outer",
+                implementation_record_type="Impl_Outer",
+                field_order="1",
+                element_name="NestedAppField",
+                implementation_element_name="NestedImplField",
+                field_category="Record",
+                data_type="App_Inner",
+                implementation_field_type="Impl_Inner",
+            ),
+            RecordElementContract(
+                record_type="App_Inner",
+                implementation_record_type="Impl_Inner",
+                field_order="1",
+                element_name="Value",
+                implementation_element_name="RawValue",
+                field_category="Value",
+                data_type="App_uint8",
+                implementation_field_type="uint8",
+            ),
+        ],
+    )
+
+    excel = tmp_path / "nested_record.xlsx"
+    write_contract_excel(contract, excel)
+    model = load_workbook_v2(excel)
+    outer = next(row for row in model.record_elements if row.record_type_name == "App_Outer")
+
+    assert outer.element_name == "NestedAppField"
+    assert outer.implementation_element_name == "NestedImplField"
+    assert outer.element_category == "Record"
+    assert outer.application_element_type_ref == "/DataTypes/App_Inner"
+    assert outer.implementation_element_type_ref == "/DataTypes/Impl_Inner"
+
+    from arxml_codegen.generator.arxml_writer import build_arxml_v2
+
+    xml = build_arxml_v2(model)
+    namespace = {"a": "http://autosar.org/schema/r4.0"}
+    outer_adt = next(
+        node
+        for node in xml.xpath("//a:APPLICATION-RECORD-DATA-TYPE", namespaces=namespace)
+        if node.findtext("a:SHORT-NAME", namespaces=namespace) == "App_Outer"
+    )
+    outer_idt = next(
+        node
+        for node in xml.xpath("//a:IMPLEMENTATION-DATA-TYPE", namespaces=namespace)
+        if node.findtext("a:SHORT-NAME", namespaces=namespace) == "Impl_Outer"
+    )
+    assert outer_adt.findtext(".//a:APPLICATION-RECORD-ELEMENT/a:CATEGORY", namespaces=namespace) == "STRUCTURE"
+    assert outer_adt.find(".//a:TYPE-TREF", namespaces=namespace).get("DEST") == "APPLICATION-RECORD-DATA-TYPE"
+    assert outer_idt.findtext(".//a:IMPLEMENTATION-DATA-TYPE-ELEMENT/a:SHORT-NAME", namespaces=namespace) == "NestedImplField"
 
 
 def test_signal_atomic_profile_distinguishes_operation_invocation_trigger_from_access_binding(tmp_path) -> None:

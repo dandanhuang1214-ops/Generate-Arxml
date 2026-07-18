@@ -147,6 +147,7 @@ class RecordElementContract:
     implementation_record_type: str = ""
     field_order: str = ""
     element_name: str = ""
+    implementation_element_name: str = ""
     field_category: str = ""
     data_type: str = ""
     implementation_field_type: str = ""

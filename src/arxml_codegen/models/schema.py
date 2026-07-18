@@ -70,6 +70,8 @@ class RecordElementRow(SourceRow):
     application_element_type_ref: str = ""
     implementation_element_type_ref: str = ""
     order: str = ""
+    implementation_element_name: str = ""
+    element_category: str = ""
 
 
 @dataclass(slots=True)

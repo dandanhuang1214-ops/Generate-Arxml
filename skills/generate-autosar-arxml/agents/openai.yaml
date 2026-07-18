@@ -1,0 +1,4 @@
+interface:
+  display_name: "Generate AUTOSAR ARXML"
+  short_description: "Validate delivery documents and generate DaVinci ARXML"
+  default_prompt: "Use $generate-autosar-arxml to validate this delivery document and generate DaVinci-compatible ARXML."

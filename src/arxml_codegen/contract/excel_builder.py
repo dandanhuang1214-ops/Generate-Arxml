@@ -7,7 +7,7 @@ from openpyxl import Workbook
 from openpyxl.styles import Font, PatternFill
 from openpyxl.worksheet.datavalidation import DataValidation
 
-from arxml_codegen.contract.schema import DeliveryContract
+from arxml_codegen.contract.schema import DeliveryContract, RunnableContract
 from arxml_codegen.excel.template import SHEETS
 
 
@@ -36,8 +36,16 @@ def write_contract_excel(contract: DeliveryContract, output: Path) -> None:
 
 
 def build_workbook_rows(contract: DeliveryContract) -> dict[str, list[dict[str, str]]]:
-    if _profile(contract) == "signal_atomic_davinci":
+    profile = _profile(contract)
+    if profile == "signal_atomic_davinci":
         return _build_signal_atomic_davinci_rows(contract)
+    if profile == "mixed_signal_soa":
+        return _build_mixed_signal_soa_rows(contract)
+
+    return _build_generic_rows(contract)
+
+
+def _build_generic_rows(contract: DeliveryContract) -> dict[str, list[dict[str, str]]]:
 
     root = _root(contract)
     paths = _davinci_paths(contract)
@@ -199,12 +207,20 @@ def build_workbook_rows(contract: DeliveryContract) -> dict[str, list[dict[str, 
     for order, element in enumerate(contract.record_elements, start=1):
         if not element.record_type or not element.element_name:
             continue
+        is_record = (element.field_category or "").strip().lower() == "record"
+        implementation_type = _short(element.implementation_field_type)
         rows["RecordElements"].append(
             {
                 "RecordTypeName": _app_type(element.record_type),
                 "ElementName": element.element_name,
+                "ImplementationElementName": element.implementation_element_name or element.element_name,
+                "ElementCategory": "Record" if is_record else element.field_category,
                 "ApplicationElementTypeRef": _data_type_ref(paths, _app_type(element.data_type)),
-                "ImplementationElementTypeRef": f"/AUTOSAR_Platform/ImplementationDataTypes/{_base_type_for_contract(contract, element.data_type)}",
+                "ImplementationElementTypeRef": (
+                    _data_type_ref(paths, implementation_type)
+                    if is_record
+                    else f"/AUTOSAR_Platform/ImplementationDataTypes/{_base_type_for_contract(contract, element.implementation_field_type or element.data_type)}"
+                ),
                 "Order": str(order),
                 "Description": element.description,
             }
@@ -308,7 +324,11 @@ def build_workbook_rows(contract: DeliveryContract) -> dict[str, list[dict[str, 
             continue
         rows["CSArguments"].append(
             {
-                "InterfaceName": _find_interface_for_operation(contract, arg.operation_name),
+                "InterfaceName": _find_interface_for_operation(
+                    contract,
+                    arg.operation_name,
+                    arg.interface_name,
+                ),
                 "OperationName": arg.operation_name,
                 "ArgumentName": arg.argument_name,
                 "Direction": arg.direction,
@@ -379,7 +399,12 @@ def build_workbook_rows(contract: DeliveryContract) -> dict[str, list[dict[str, 
                     _data_element_from_port_or_signal(signal_name),
                 )
             )
-        if related_operation and related_port.startswith("Rp_"):
+        if related_operation and _is_client_service_port(
+            contract,
+            runnable.swc,
+            related_port,
+            related_operation,
+        ):
             rows["RunnableAccesses"].append(
                 _runnable_access_row(
                     runnable.swc,
@@ -390,6 +415,131 @@ def build_workbook_rows(contract: DeliveryContract) -> dict[str, list[dict[str, 
                     "",
                 )
             )
+
+    _dedupe_rows(rows)
+    return rows
+
+
+def _build_mixed_signal_soa_rows(contract: DeliveryContract) -> dict[str, list[dict[str, str]]]:
+    """Build the multi-SWC CP model while preserving DaVinci signal naming.
+
+    Signal tables define the reusable S/R interface and data-type pool. Actual
+    component S/R ports are created only from Runnable Access rows. C/S ports,
+    operations, composition prototypes and connectors continue to use the
+    generic SOA builder.
+    """
+    rows = _build_generic_rows(contract)
+    signal_rows = _build_signal_atomic_davinci_rows(contract)
+    mapping_path = "/ComponentTypes/MappingSets/APP_data_mapping"
+
+    # Reuse the proven signal data-type rules: Record and Primitive types are
+    # mutually exclusive, Boolean uses the platform CM/DC, and LINEAR keeps the
+    # document's physical limits, resolution and offset.
+    data_type_sheets = (
+        "PrimitiveDataTypes",
+        "RecordTypes",
+        "RecordElements",
+        "DataTypeMappings",
+        "CompuMethods",
+        "CompuScales",
+        "DataConstrs",
+        "Units",
+    )
+    for sheet in data_type_sheets:
+        rows[sheet] = [dict(row) for row in signal_rows[sheet]]
+    for row in rows["DataTypeMappings"]:
+        row["MappingSetPath"] = mapping_path
+
+    # DaVinci's reusable package layout places SWC types directly below
+    # /ComponentTypes; interfaces and data types remain in their own packages.
+    for row in rows["ProjectConfig"]:
+        if row.get("Key") == "RootPackage":
+            row["Value"] = "/ComponentTypes"
+        elif row.get("Key") == "DefaultMappingSetPath":
+            row["Value"] = mapping_path
+    rows["ProjectConfig"].append({"Key": "GenerationProfile", "Value": "mixed_signal_soa"})
+    for row in rows["Components"]:
+        row["PackagePath"] = "/ComponentTypes"
+    for row in rows["ComponentPrototypes"]:
+        component_name = row.get("ComponentTypeName", "")
+        row["ComponentTypeRef"] = f"/ComponentTypes/{component_name}"
+
+    # The signal tables configure only Application Port Interfaces. Interface
+    # and DataElement SHORT-NAMEs both remain exactly equal to SignalName.
+    rows["SRInterfaces"] = []
+    rows["SRDataElements"] = []
+    signals_by_name = {}
+    for signal in contract.signals:
+        signal_name = _short(signal.signal_name)
+        if not signal_name:
+            continue
+        signals_by_name[signal_name] = signal
+        rows["SRInterfaces"].append(
+            {
+                "InterfaceName": signal_name,
+                "InterfacePath": f"/PortInterfaces/{signal_name}",
+                "IsService": "false",
+                "Description": signal.description,
+            }
+        )
+        rows["SRDataElements"].append(
+            {
+                "InterfaceName": signal_name,
+                "DataElementName": signal_name,
+                "ApplicationTypeRef": _signal_app_type_ref(
+                    signal, _base_type_for_signal(contract, signal)
+                ),
+                "Description": signal.description,
+            }
+        )
+
+    # Preserve explicit C/S ports. S/R component ports and accesses are rebuilt
+    # solely from Runnable Access, using its signal/port name verbatim.
+    rows["Ports"] = [row for row in rows["Ports"] if row.get("InterfaceKind") != "SR"]
+    rows["RunnableAccesses"] = [
+        row for row in rows["RunnableAccesses"] if row.get("AccessType") == "ServerCallPoint"
+    ]
+    rows["PortRecordInitValues"] = []
+    sr_ports_added: set[tuple[str, str]] = set()
+    for runnable in contract.runnables:
+        if not runnable.swc or not runnable.runnable_name:
+            continue
+        for access_type, direction, values in (
+            ("DataRead", "R", runnable.read_signals),
+            ("DataWrite", "P", runnable.write_signals),
+        ):
+            for raw_name in _split_list(values):
+                port_name = _short(raw_name)
+                signal = signals_by_name.get(port_name)
+                if signal and (runnable.swc, port_name) not in sr_ports_added:
+                    port_row = _sr_port_row(
+                        runnable.swc,
+                        port_name,
+                        direction,
+                        f"/PortInterfaces/{port_name}",
+                        port_name,
+                        signal,
+                    )
+                    base_type = _base_type_for_signal(contract, signal)
+                    port_row["InitValue"] = _signal_init_value(signal, base_type)
+                    port_row["InitValueType"] = _signal_init_value_type(signal, base_type)
+                    rows["Ports"].append(port_row)
+                    if port_row["InitValueType"] == "Record":
+                        _add_record_init_rows(rows, runnable.swc, port_name, signal, contract)
+                    sr_ports_added.add((runnable.swc, port_name))
+
+                # Keep a missing signal reference visible to model validation;
+                # the DOCX gap report already explains that it must be defined.
+                rows["RunnableAccesses"].append(
+                    _runnable_access_row(
+                        runnable.swc,
+                        runnable.runnable_name,
+                        access_type,
+                        port_name,
+                        "",
+                        port_name,
+                    )
+                )
 
     _dedupe_rows(rows)
     return rows
@@ -454,6 +604,21 @@ def _build_signal_atomic_davinci_rows(contract: DeliveryContract) -> dict[str, l
             for signal in contract.signals
             if signal.signal_name
         }
+        | {
+            _normalize_base_type(data_type.base_type)
+            for data_type in contract.data_types
+            if (data_type.type_kind or "").strip().lower() != "record"
+        }
+        | {
+            _normalize_base_type(element.implementation_field_type or element.data_type)
+            for element in contract.record_elements
+            if (element.field_category or "").strip().lower() != "record"
+        }
+        | {
+            _normalize_base_type(argument.internal_data_type or argument.data_type)
+            for argument in contract.operation_args
+            if (argument.value_type or "").strip().lower() != "record"
+        }
     )
     for base_type in used_base_types:
         app_type = f"App_{base_type}"
@@ -472,7 +637,7 @@ def _build_signal_atomic_davinci_rows(contract: DeliveryContract) -> dict[str, l
                 "CompuMethodRef": compu_ref,
                 "DataConstrRef": constr_ref,
                 "CalibrationAccess": "READ-ONLY",
-                "UnitRef": "/DataTypes/Units/No_Unit" if base_type != "boolean" else "",
+                "UnitRef": _shared_base_type_unit_ref(contract, base_type),
                 "Description": f"Shared application type for {base_type} signals",
             }
         )
@@ -509,7 +674,15 @@ def _build_signal_atomic_davinci_rows(contract: DeliveryContract) -> dict[str, l
             ]
         )
 
-    for unit in sorted({dt.unit for dt in contract.data_types if dt.unit and _short(dt.unit)}):
+    for unit in sorted(
+        {
+            dt.unit
+            for dt in contract.data_types
+            if dt.unit
+            and _short(dt.unit)
+            and _short(dt.unit).lower() != "no_unit"
+        }
+    ):
         rows["Units"].append(
             {
                 "UnitName": f"Unit_{_short(unit)}",
@@ -549,13 +722,20 @@ def _build_signal_atomic_davinci_rows(contract: DeliveryContract) -> dict[str, l
             continue
         app_type = _short(element.record_type)
         field_app = _short(element.data_type)
-        impl_field = _normalize_base_type(element.implementation_field_type or element.data_type)
+        is_record = (element.field_category or "").strip().lower() == "record"
+        impl_field = _short(element.implementation_field_type) if is_record else _normalize_base_type(element.implementation_field_type or element.data_type)
         rows["RecordElements"].append(
             {
                 "RecordTypeName": app_type,
                 "ElementName": element.element_name,
+                "ImplementationElementName": element.implementation_element_name or element.element_name,
+                "ElementCategory": "Record" if is_record else element.field_category,
                 "ApplicationElementTypeRef": f"/DataTypes/{field_app}",
-                "ImplementationElementTypeRef": f"/AUTOSAR_Platform/ImplementationDataTypes/{impl_field}",
+                "ImplementationElementTypeRef": (
+                    f"/DataTypes/{impl_field}"
+                    if is_record
+                    else f"/AUTOSAR_Platform/ImplementationDataTypes/{impl_field}"
+                ),
                 "Order": element.field_order,
                 "Description": element.description,
             }
@@ -1172,7 +1352,23 @@ def _unit_ref(paths: dict[str, str], unit: str) -> str:
 
 def _signal_atomic_unit_ref(unit: str) -> str:
     short = _short(unit)
-    return f"/DataTypes/Units/Unit_{short}" if short else "/DataTypes/Units/No_Unit"
+    if not short:
+        return ""
+    if short.lower() == "no_unit":
+        return "/DataTypes/Units/No_Unit"
+    return f"/DataTypes/Units/Unit_{short}"
+
+
+def _shared_base_type_unit_ref(contract: DeliveryContract, base_type: str) -> str:
+    app_type = f"App_{base_type}"
+    explicit_units = {
+        (data_type.unit or "").strip()
+        for data_type in contract.data_types
+        if _short(data_type.type_name) == app_type and (data_type.unit or "").strip()
+    }
+    if not explicit_units:
+        return ""
+    return _signal_atomic_unit_ref(sorted(explicit_units)[0])
 
 
 
@@ -1206,11 +1402,36 @@ def _split_range(value: str) -> tuple[str, str]:
     return "0", "255"
 
 
-def _find_interface_for_operation(contract: DeliveryContract, operation: str) -> str:
+def _find_interface_for_operation(
+    contract: DeliveryContract,
+    operation: str,
+    explicit_interface: str = "",
+) -> str:
+    if _short(explicit_interface):
+        return _short(explicit_interface)
     for service in contract.services:
         if service.operation_name == operation:
             return service.interface_name or f"If_{service.service_name}_CS"
     return ""
+
+
+def _is_client_service_port(
+    contract: DeliveryContract,
+    component_name: str,
+    port_name: str,
+    operation_name: str,
+) -> bool:
+    component = _short(component_name)
+    port = _short(port_name)
+    operation = _short(operation_name)
+    for service in contract.services:
+        if (
+            _short(service.owner_swc or service.client_swc) == component
+            and _short(service.port_name) == port
+            and _short(service.operation_name) == operation
+        ):
+            return _port_direction_from_role(service.port_role) == "R"
+    return False
 
 
 def _init_value_type(signal) -> str:
@@ -1238,6 +1459,8 @@ def _infer_operation_port(contract: DeliveryContract, runnable) -> str:
 
 
 def _composition_name(contract: DeliveryContract) -> str:
+    if _short(contract.project.composition_name):
+        return _short(contract.project.composition_name)
     for swc in contract.swcs:
         if (swc.kind or "").lower() == "composition":
             return swc.name
